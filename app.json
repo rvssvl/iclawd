@@ -1,0 +1,64 @@
+{
+  "expo": {
+    "name": "iClawd",
+    "slug": "third-voice-ai",
+    "version": "2.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "scheme": "iclawd",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0A0A0A"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.rakhimzhan.ai.third.voice",
+      "buildNumber": "2.0.0",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "iClawd needs microphone access for voice conversations with your AI agent.",
+        "NSSpeechRecognitionUsageDescription": "iClawd uses speech recognition to convert your voice to text.",
+        "NSCameraUsageDescription": "iClawd uses the camera to scan QR codes for gateway connection.",
+        "NSPhotoLibraryUsageDescription": "iClawd may access your photo library to share images with your AI agent."
+      }
+    },
+    "android": {
+      "package": "com.rakhimzhan.ai.third.voice",
+      "versionCode": 200,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0A0A0A"
+      },
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "RECORD_AUDIO",
+        "CAMERA"
+      ]
+    },
+    "extra": {
+      "eas": {
+        "projectId": "YOUR_EAS_PROJECT_ID"
+      }
+    },
+    "owner": "YOUR_EXPO_USERNAME",
+    "runtimeVersion": "2.0.0",
+    "updates": {
+      "url": "https://u.expo.dev/YOUR_EAS_PROJECT_ID"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "@config-plugins/react-native-siri-shortcut",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 200,
+          "backgroundColor": "#0A0A0A"
+        }
+      ]
+    ]
+  }
+}

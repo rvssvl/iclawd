@@ -1,0 +1,30 @@
+diff --git a/node_modules/react-native-siri-shortcut/ios/RNSSSiriShortcuts.m b/node_modules/react-native-siri-shortcut/ios/RNSSSiriShortcuts.m
+index b1a8a6e..9e23cdf 100644
+--- a/node_modules/react-native-siri-shortcut/ios/RNSSSiriShortcuts.m
++++ b/node_modules/react-native-siri-shortcut/ios/RNSSSiriShortcuts.m
+@@ -285,7 +285,24 @@ - (void)stopObserving
+                     self->_presenterViewController = presenterViewController;
+                 }
+                 self->_presenterViewController.modalPresentationStyle = UIModalPresentationFormSheet;
+-                UIViewController *rootViewController = [UIApplication sharedApplication].keyWindow.rootViewController;
++                UIViewController *rootViewController = nil;
++                if (@available(iOS 13.0, *)) {
++                    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
++                        if ([scene isKindOfClass:[UIWindowScene class]]) {
++                            UIWindowScene *windowScene = (UIWindowScene *)scene;
++                            for (UIWindow *window in windowScene.windows) {
++                                if (window.isKeyWindow) {
++                                    rootViewController = window.rootViewController;
++                                    break;
++                                }
++                            }
++                            if (rootViewController) break;
++                        }
++                    }
++                }
++                if (!rootViewController) {
++                    rootViewController = [UIApplication sharedApplication].keyWindow.rootViewController;
++                }
+                 [rootViewController presentViewController:self->_presenterViewController
+                                                  animated:true
+                                                completion:nil];
