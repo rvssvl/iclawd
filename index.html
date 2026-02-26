@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>iClawd — Voice-First Companion for OpenClaw</title>
+  <meta name="description" content="Talk to your self-hosted OpenClaw AI agents hands-free. Push-to-talk, Siri Shortcuts, ElevenLabs TTS. Open source, MIT licensed.">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg: #0A0A0A;
+      --bg-card: #111113;
+      --bg-card-hover: #18181b;
+      --text: #f4f4f5;
+      --text-muted: #a1a1aa;
+      --accent: #8B5CF6;
+      --accent-dim: rgba(139, 92, 246, 0.15);
+      --border: #27272a;
+      --radius: 12px;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Nav */
+    nav {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 100;
+      background: rgba(10, 10, 10, 0.85);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--border);
+    }
+
+    nav .nav-inner {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 0 24px;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    nav .logo {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text);
+      text-decoration: none;
+      letter-spacing: -0.02em;
+    }
+
+    nav .logo span { color: var(--accent); }
+
+    nav .nav-links {
+      display: flex;
+      gap: 28px;
+      list-style: none;
+    }
+
+    nav .nav-links a {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: color 0.2s;
+    }
+
+    nav .nav-links a:hover { color: var(--text); }
+
+    /* Sections */
+    section { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+
+    /* Hero */
+    .hero {
+      padding-top: 140px;
+      padding-bottom: 80px;
+      text-align: center;
+    }
+
+    .hero-badge {
+      display: inline-block;
+      padding: 6px 14px;
+      background: var(--accent-dim);
+      color: var(--accent);
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 24px;
+      letter-spacing: 0.02em;
+    }
+
+    .hero h1 {
+      font-size: clamp(36px, 6vw, 56px);
+      font-weight: 800;
+      line-height: 1.1;
+      letter-spacing: -0.03em;
+      margin-bottom: 20px;
+    }
+
+    .hero h1 span { color: var(--accent); }
+
+    .hero p {
+      font-size: 18px;
+      color: var(--text-muted);
+      max-width: 560px;
+      margin: 0 auto 36px;
+      line-height: 1.7;
+    }
+
+    .hero-buttons {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 24px;
+      border-radius: 10px;
+      font-size: 15px;
+      font-weight: 600;
+      text-decoration: none;
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: white;
+    }
+
+    .btn-primary:hover { background: #7c4fe0; }
+
+    .btn-secondary {
+      background: var(--bg-card);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .btn-secondary:hover {
+      background: var(--bg-card-hover);
+      border-color: #3f3f46;
+    }
+
+    /* Features */
+    .features { padding-bottom: 80px; }
+
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+    }
+
+    .feature-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 28px;
+      transition: border-color 0.2s, background 0.2s;
+    }
+
+    .feature-card:hover {
+      border-color: #3f3f46;
+      background: var(--bg-card-hover);
+    }
+
+    .feature-icon {
+      width: 40px;
+      height: 40px;
+      background: var(--accent-dim);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      margin-bottom: 16px;
+    }
+
+    .feature-card h3 {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .feature-card p {
+      font-size: 14px;
+      color: var(--text-muted);
+      line-height: 1.6;
+    }
+
+    /* Privacy */
+    .privacy { padding-top: 80px; padding-bottom: 80px; }
+
+    .section-title {
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin-bottom: 12px;
+    }
+
+    .section-subtitle {
+      color: var(--text-muted);
+      font-size: 15px;
+      margin-bottom: 48px;
+    }
+
+    .privacy-content {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 40px;
+    }
+
+    .privacy-content h3 {
+      font-size: 17px;
+      font-weight: 700;
+      margin-top: 32px;
+      margin-bottom: 12px;
+      color: var(--text);
+    }
+
+    .privacy-content h3:first-child { margin-top: 0; }
+
+    .privacy-content p,
+    .privacy-content li {
+      font-size: 15px;
+      color: var(--text-muted);
+      line-height: 1.7;
+    }
+
+    .privacy-content ul {
+      padding-left: 20px;
+      margin-top: 8px;
+    }
+
+    .privacy-content li { margin-bottom: 6px; }
+
+    .privacy-content a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    .privacy-content a:hover { text-decoration: underline; }
+
+    .effective-date {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-bottom: 24px;
+      padding-bottom: 24px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    /* Contact */
+    .contact {
+      padding-top: 80px;
+      padding-bottom: 100px;
+    }
+
+    .contact-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 40px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 40px;
+    }
+
+    .contact-item h3 {
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .contact-item a, .contact-item p {
+      font-size: 16px;
+      color: var(--text);
+      text-decoration: none;
+    }
+
+    .contact-item a:hover { color: var(--accent); }
+
+    /* Footer */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 24px;
+      text-align: center;
+    }
+
+    footer p {
+      font-size: 13px;
+      color: #52525b;
+    }
+
+    /* Mobile */
+    @media (max-width: 600px) {
+      nav .nav-links { gap: 16px; }
+      nav .nav-links a { font-size: 13px; }
+      .privacy-content { padding: 24px; }
+      .contact-card { padding: 24px; }
+    }
+  </style>
+</head>
+<body>
+
+  <nav>
+    <div class="nav-inner">
+      <a href="#" class="logo">i<span>Clawd</span></a>
+      <ul class="nav-links">
+        <li><a href="#about">About</a></li>
+        <li><a href="#privacy-policy">Privacy</a></li>
+        <li><a href="#contact">Contact</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <section class="hero" id="about">
+    <div class="hero-badge">Open Source &middot; MIT Licensed</div>
+    <h1>Talk to your AI agent.<br><span>Hands free.</span></h1>
+    <p>iClawd is a voice-first mobile companion for OpenClaw. Connect to your self-hosted agent and have natural voice conversations &mdash; no cloud middleman, no vendor lock-in.</p>
+    <div class="hero-buttons">
+      <a href="https://github.com/rvssvl/iclawd" class="btn btn-primary">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+        GitHub
+      </a>
+      <a href="#privacy-policy" class="btn btn-secondary">Privacy Policy</a>
+    </div>
+  </section>
+
+  <section class="features">
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="feature-icon">&#127908;</div>
+        <h3>Voice-First</h3>
+        <p>Push-to-talk and continuous listening with real-time speech-to-text. Automatic silence detection sends your message when you stop talking.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#128274;</div>
+        <h3>Secure by Design</h3>
+        <p>Ed25519 cryptographic device authentication. Credentials stored in iOS Keychain and Android Keystore. No data sent to third parties.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#127911;</div>
+        <h3>Premium Voice</h3>
+        <p>Optional ElevenLabs text-to-speech for natural responses. Built-in system voice fallback works without any API key.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#128268;</div>
+        <h3>Self-Hosted</h3>
+        <p>Connects directly to your OpenClaw gateway over WebSocket. Local network, Tailscale, or public URL. Your data stays yours.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#128172;</div>
+        <h3>Text Chat</h3>
+        <p>Full text conversation interface with streaming responses, copy-to-clipboard, and connection status indicators.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#9898;</div>
+        <h3>Siri Shortcuts</h3>
+        <p>Say "Hey Siri, Ask Claw" to launch voice mode instantly. No complex setup required.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="privacy" id="privacy-policy">
+    <h2 class="section-title">Privacy Policy</h2>
+    <p class="section-subtitle">How iClawd handles your data &mdash; the short version: it doesn't collect any.</p>
+
+    <div class="privacy-content">
+      <p class="effective-date">Effective Date: February 19, 2026</p>
+
+      <h3>1. Data Collection</h3>
+      <ul>
+        <li>iClawd does <strong>not</strong> collect, store, or transmit any personal data to the developer or any third-party analytics service.</li>
+        <li>The app does <strong>not</strong> include any analytics, tracking, or telemetry SDKs.</li>
+        <li>No user accounts are required. There is no sign-up or login.</li>
+      </ul>
+
+      <h3>2. Local Storage</h3>
+      <ul>
+        <li>Gateway connection URL and authentication token are stored locally on your device using iOS Keychain or Android Keystore (encrypted, hardware-backed secure storage).</li>
+        <li>An Ed25519 cryptographic key pair is generated and stored locally on your device for gateway authentication. It never leaves the device.</li>
+        <li>User preferences (auto-pronounce toggle, notification toggle) are stored locally on device.</li>
+        <li>No conversation history is persisted &mdash; messages exist only in memory during an active session.</li>
+      </ul>
+
+      <h3>3. Network Communications</h3>
+      <ul>
+        <li>The app connects <strong>only</strong> to the gateway URL that you configure. This is typically your own self-hosted OpenClaw server (local network, Tailscale, or your own public server). The developer has no access to this connection.</li>
+        <li>If you configure an ElevenLabs API key for premium text-to-speech, the app sends assistant response text to the ElevenLabs API (<code>api.elevenlabs.io</code>) to generate audio. This is optional and uses your own API key. The developer has no access to your ElevenLabs key or the data sent.</li>
+        <li>The app checks for over-the-air updates from Expo's update service (<code>u.expo.dev</code>). This transmits only app runtime version and platform info, no personal data.</li>
+      </ul>
+
+      <h3>4. Microphone &amp; Speech Recognition</h3>
+      <ul>
+        <li>Microphone access is used solely for voice input during conversations.</li>
+        <li>Speech recognition is processed by Apple's on-device Speech framework (iOS) or the device's built-in speech recognition (Android). Audio is not sent to the developer or any third party beyond what the OS speech framework requires.</li>
+      </ul>
+
+      <h3>5. Camera</h3>
+      <ul>
+        <li>Camera permission is requested for a planned QR code scanning feature for gateway pairing. It is not currently active. No photos or video are captured or stored.</li>
+      </ul>
+
+      <h3>6. Third-Party Services</h3>
+      <ul>
+        <li><strong>ElevenLabs</strong> (optional, user-configured): Text-to-speech API. Subject to <a href="https://elevenlabs.io/privacy" target="_blank" rel="noopener">ElevenLabs' privacy policy</a>. Only used if the user explicitly provides an API key.</li>
+        <li><strong>Expo Updates</strong>: Over-the-air update delivery. Subject to <a href="https://expo.dev/privacy" target="_blank" rel="noopener">Expo's privacy policy</a>. Transmits only technical metadata (app version, platform), no personal data.</li>
+        <li>No other third-party services, SDKs, or analytics tools are integrated.</li>
+      </ul>
+
+      <h3>7. Children's Privacy</h3>
+      <p>The app is not directed at children under 13. We do not knowingly collect data from children.</p>
+
+      <h3>8. Changes to This Policy</h3>
+      <p>Any changes will be posted on this page with an updated effective date.</p>
+
+      <h3>9. Contact</h3>
+      <p>For privacy questions, contact <a href="mailto:rassul.rakhimzhan@gmail.com">rassul.rakhimzhan@gmail.com</a>.</p>
+    </div>
+  </section>
+
+  <section class="contact" id="contact">
+    <h2 class="section-title">Contact</h2>
+    <p class="section-subtitle">Questions, feedback, or contributions &mdash; reach out anytime.</p>
+
+    <div class="contact-card">
+      <div class="contact-item">
+        <h3>Developer</h3>
+        <p>Rassul Rakhimzhan</p>
+      </div>
+      <div class="contact-item">
+        <h3>Email</h3>
+        <a href="mailto:rassul.rakhimzhan@gmail.com">rassul.rakhimzhan@gmail.com</a>
+      </div>
+      <div class="contact-item">
+        <h3>GitHub</h3>
+        <a href="https://github.com/rvssvl/iclawd" target="_blank" rel="noopener">github.com/rvssvl/iclawd</a>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p>&copy; 2026 Rassul Rakhimzhan. All rights reserved.</p>
+  </footer>
+
+</body>
+</html>
