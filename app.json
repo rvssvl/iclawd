@@ -2,7 +2,7 @@
   "expo": {
     "name": "iClawd",
     "slug": "third-voice-ai",
-    "version": "2.0.0",
+    "version": "2.0.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
@@ -16,7 +16,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.rakhimzhan.ai.third.voice",
-      "buildNumber": "2.0.0",
+      "buildNumber": "9",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "iClawd needs microphone access for voice conversations with your AI agent.",
         "NSSpeechRecognitionUsageDescription": "iClawd uses speech recognition to convert your voice to text.",
@@ -26,7 +26,7 @@
     },
     "android": {
       "package": "com.rakhimzhan.ai.third.voice",
-      "versionCode": 200,
+      "versionCode": 201,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0A0A0A"
@@ -43,7 +43,7 @@
       }
     },
     "owner": "YOUR_EXPO_USERNAME",
-    "runtimeVersion": "2.0.0",
+    "runtimeVersion": "2.0.1",
     "updates": {
       "url": "https://u.expo.dev/YOUR_EAS_PROJECT_ID"
     },

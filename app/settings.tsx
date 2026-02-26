@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, Pressable, Alert, ScrollView, TextInput, Platform, Switch } from 'react-native';
+import { View, Text, StyleSheet, Pressable, Alert, ScrollView, TextInput, Platform, Switch, Linking } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
@@ -223,7 +223,7 @@ export default function SettingsScreen() {
       <View style={styles.card}>
         <View style={styles.row}>
           <Text style={styles.rowLabel}>Version</Text>
-          <Text style={styles.rowValue}>2.0.0</Text>
+          <Text style={styles.rowValue}>2.0.1</Text>
         </View>
         <View style={styles.divider} />
         <View style={styles.row}>
@@ -231,7 +231,7 @@ export default function SettingsScreen() {
           <Text style={styles.rowValue}>MIT</Text>
         </View>
         <View style={styles.divider} />
-        <Pressable style={styles.row} onPress={() => {}}>
+        <Pressable style={styles.row} onPress={() => Linking.openURL('https://github.com/rvssvl/iclawd')}>
           <Text style={styles.rowLabel}>GitHub</Text>
           <Ionicons name="logo-github" size={18} color={colors.textSecondary} />
         </Pressable>
