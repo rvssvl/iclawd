@@ -137,11 +137,11 @@ export function useVoiceConversation({
       }
 
       dispatch({ type: 'BACKGROUND' });
-      suspend();
+      suspend({ keepPlayback: true });
     });
 
     return () => sub.remove();
-  }, [connectionState, reconnect, suspend]);
+  }, [connectionState, reconnect, suspend, voiceState]);
 
   useEffect(() => {
     const shouldListen =

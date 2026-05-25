@@ -22,9 +22,13 @@ type StateListener = (state: VoiceState) => void;
 type InputProviderListener = (provider: VoiceInputProvider) => void;
 type TranscriptListener = (text: string, isFinal: boolean) => void;
 type ErrorListener = (error: string) => void;
+interface SuspendOptions {
+  keepPlayback?: boolean;
+}
 
 const ELEVENLABS_MODEL = 'eleven_flash_v2_5';
 const ELEVENLABS_AUTH_FAILURE = /HTTP\s+(401|403)\b/i;
+const ELEVENLABS_TTS_TIMEOUT_MS = 30000;
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -103,11 +107,7 @@ class VoiceEngineService {
     if (this.initialized) return;
 
     this.bindRecognitionHandlers();
-    await Audio.setAudioModeAsync({
-      allowsRecordingIOS: true,
-      playsInSilentModeIOS: true,
-      staysActiveInBackground: false,
-    });
+    await this.useRecordingAudioMode();
 
     const available = await Voice.isAvailable();
     if (!available) {
@@ -139,11 +139,7 @@ class VoiceEngineService {
 
   async startListening(continuous = false): Promise<void> {
     return this.enqueueOperation(async () => {
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: false,
-      });
+      await this.useRecordingAudioMode();
       this.continuousMode = continuous;
 
       if (this._state === 'listening' || this.recognizing || this.recording) {
@@ -250,11 +246,7 @@ class VoiceEngineService {
       settleTtsOption('pitch', () => Tts.setDefaultPitch(1.0)),
     ]);
 
-    await Audio.setAudioModeAsync({
-      allowsRecordingIOS: false,
-      playsInSilentModeIOS: true,
-      staysActiveInBackground: false,
-    });
+    await this.usePlaybackAudioMode(true);
     let started = false;
     let completed = false;
     let utteranceId: string | number | null = null;
@@ -349,47 +341,57 @@ class VoiceEngineService {
       console.log('[VoiceEngine] ElevenLabs: starting request...');
       const settings = await getElevenLabsTtsSettings();
 
-      // Use XHR with arraybuffer responseType — most reliable binary method in RN Hermes
-      const arrayBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', `https://api.elevenlabs.io/v1/text-to-speech/${settings.voiceId}`);
-        xhr.setRequestHeader('xi-api-key', apiKey);
-        xhr.setRequestHeader('Content-Type', 'application/json');
-        xhr.responseType = 'arraybuffer';
-        xhr.timeout = 15000;
+      const requestAudio = () => new Promise<ArrayBuffer>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', `https://api.elevenlabs.io/v1/text-to-speech/${settings.voiceId}`);
+          xhr.setRequestHeader('xi-api-key', apiKey);
+          xhr.setRequestHeader('Content-Type', 'application/json');
+          xhr.responseType = 'arraybuffer';
+          xhr.timeout = ELEVENLABS_TTS_TIMEOUT_MS;
 
-        xhr.onload = () => {
-          console.log('[VoiceEngine] XHR status:', xhr.status, 'response type:', typeof xhr.response);
-          if (xhr.status !== 200) {
-            // Try to read error as text
-            try {
-              const decoder = new TextDecoder();
-              const errText = decoder.decode(new Uint8Array(xhr.response));
-              reject(new Error(`HTTP ${xhr.status}: ${errText.slice(0, 200)}`));
-            } catch {
-              reject(new Error(`HTTP ${xhr.status}`));
+          xhr.onload = () => {
+            console.log('[VoiceEngine] XHR status:', xhr.status, 'response type:', typeof xhr.response);
+            if (xhr.status !== 200) {
+              // Try to read error as text
+              try {
+                const decoder = new TextDecoder();
+                const errText = decoder.decode(new Uint8Array(xhr.response));
+                reject(new Error(`HTTP ${xhr.status}: ${errText.slice(0, 200)}`));
+              } catch {
+                reject(new Error(`HTTP ${xhr.status}`));
+              }
+              return;
             }
-            return;
-          }
-          if (!xhr.response || !(xhr.response instanceof ArrayBuffer)) {
-            reject(new Error(`Invalid response type: ${typeof xhr.response}`));
-            return;
-          }
-          resolve(xhr.response);
-        };
-        xhr.onerror = () => reject(new Error('Network error'));
-        xhr.ontimeout = () => reject(new Error('Request timeout'));
+            if (!xhr.response || !(xhr.response instanceof ArrayBuffer)) {
+              reject(new Error(`Invalid response type: ${typeof xhr.response}`));
+              return;
+            }
+            resolve(xhr.response);
+          };
+          xhr.onerror = () => reject(new Error('Network error'));
+          xhr.ontimeout = () => reject(new Error('Request timeout'));
 
-        xhr.send(JSON.stringify({
-          text,
-          model_id: ELEVENLABS_MODEL,
-          voice_settings: {
-            stability: settings.stability,
-            similarity_boost: settings.similarityBoost,
-            speed: settings.speed,
-          },
-        }));
-      });
+          xhr.send(JSON.stringify({
+            text,
+            model_id: ELEVENLABS_MODEL,
+            voice_settings: {
+              stability: settings.stability,
+              similarity_boost: settings.similarityBoost,
+              speed: settings.speed,
+            },
+          }));
+        });
+
+      // Use XHR with arraybuffer responseType — most reliable binary method in RN Hermes
+      let arrayBuffer: ArrayBuffer;
+      try {
+        arrayBuffer = await requestAudio();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (ELEVENLABS_AUTH_FAILURE.test(message)) throw error;
+        console.warn('[VoiceEngine] ElevenLabs TTS retrying after:', message);
+        arrayBuffer = await requestAudio();
+      }
 
       const bytes = new Uint8Array(arrayBuffer);
       console.log('[VoiceEngine] ElevenLabs: received', bytes.length, 'bytes');
@@ -398,11 +400,7 @@ class VoiceEngineService {
         throw new Error('Empty audio response');
       }
 
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: false,
-      });
+      await this.usePlaybackAudioMode(true);
 
       // Encode to base64 using pure JS encoder (Hermes-safe, no btoa)
       const base64Audio = VoiceEngineService.toBase64(bytes);
@@ -448,11 +446,16 @@ class VoiceEngineService {
           authFailed ? 'ElevenLabs Key Removed' : 'ElevenLabs TTS Error',
           authFailed
             ? 'Your ElevenLabs API key was rejected. I removed it and will use the system voice.'
-            : `Falling back to system voice.\n\nError: ${errMsg}`,
+            : `ElevenLabs voice failed, so I skipped pronunciation instead of using the robotic system voice.\n\nError: ${errMsg}`,
         );
       }
 
-      await this.speakWithSystem(text);
+      if (authFailed) {
+        await this.speakWithSystem(text);
+        return;
+      }
+
+      this.onSpeechDone();
     }
   }
 
@@ -464,6 +467,7 @@ class VoiceEngineService {
       });
     } else {
       this.setState('idle');
+      this.usePlaybackAudioMode(false).catch(() => {});
     }
   }
 
@@ -485,16 +489,23 @@ class VoiceEngineService {
     }
   }
 
-  async suspend(): Promise<void> {
+  async suspend(options: SuspendOptions = {}): Promise<void> {
     return this.enqueueOperation(async () => {
       this.continuousMode = false;
       this.clearSilenceTimer();
       this.latestTranscript = '';
       await this.finishElevenLabsRecording('cancel');
-      await this.stopTts();
-      await this.stopSound();
+      if (!options.keepPlayback) {
+        await this.stopTts();
+        await this.stopSound();
+      }
       await this.stopRecognition('cancel');
-      this.setState('idle');
+      if (
+        !options.keepPlayback
+        || (this._state !== 'speaking' && this._state !== 'preparingAudio')
+      ) {
+        this.setState('idle');
+      }
     });
   }
 
@@ -530,10 +541,22 @@ class VoiceEngineService {
     await this.stopRecognition('cancel');
     await this.stopSound();
     await this.stopTts();
+    await this.usePlaybackAudioMode(true);
+  }
+
+  private async useRecordingAudioMode(): Promise<void> {
+    await Audio.setAudioModeAsync({
+      allowsRecordingIOS: true,
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: false,
+    });
+  }
+
+  private async usePlaybackAudioMode(staysActiveInBackground: boolean): Promise<void> {
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: false,
       playsInSilentModeIOS: true,
-      staysActiveInBackground: false,
+      staysActiveInBackground,
     });
   }
 

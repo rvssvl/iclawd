@@ -69,9 +69,9 @@ export function useVoice() {
     }
   }, []);
 
-  const suspend = useCallback(async () => {
+  const suspend = useCallback(async (options?: { keepPlayback?: boolean }) => {
     try {
-      await voiceEngine.suspend();
+      await voiceEngine.suspend(options);
     } catch (e) {
       console.warn('[useVoice] Suspend failed:', e);
     }

@@ -17,6 +17,7 @@ import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, fontSize, spacing, borderRadius } from '@/constants/theme';
 import { GatewayProvider } from '@/contexts/GatewayContext';
+import { addSiriVoiceLaunchListener, getInitialSiriVoiceLaunch } from '@/services/SiriService';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -170,6 +171,7 @@ function UpdateBanner() {
 
 export default function RootLayout() {
   const router = useRouter();
+  const handledInitialSiriRef = useRef(false);
 
   const onLayoutReady = useCallback(async () => {
     await SplashScreen.hideAsync();
@@ -191,6 +193,33 @@ export default function RootLayout() {
       router.push('/chat');
     });
     return () => sub.remove();
+  }, [router]);
+
+  // Handle Siri shortcut launch → navigate to voice mode
+  useEffect(() => {
+    let mounted = true;
+    let unsubscribe: (() => void) | null = null;
+
+    getInitialSiriVoiceLaunch().then((shouldOpenVoice) => {
+      if (!mounted || !shouldOpenVoice || handledInitialSiriRef.current) return;
+      handledInitialSiriRef.current = true;
+      router.replace('/voice');
+    });
+
+    addSiriVoiceLaunchListener(() => {
+      router.replace('/voice');
+    }).then((cleanup) => {
+      if (!mounted) {
+        cleanup();
+        return;
+      }
+      unsubscribe = cleanup;
+    });
+
+    return () => {
+      mounted = false;
+      unsubscribe?.();
+    };
   }, [router]);
 
   return (

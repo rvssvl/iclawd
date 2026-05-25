@@ -94,7 +94,7 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
       if (msg.role === 'assistant' && msg.id !== lastSpokenMsgIdRef.current) {
         lastSpokenMsgIdRef.current = msg.id;
 
-        if (autoPronounceRef.current && AppState.currentState === 'active') {
+        if (autoPronounceRef.current) {
           voiceEngine.speak(msg.content).catch((error) => {
             console.warn('[Voice] Auto-pronounce failed:', error instanceof Error ? error.message : error);
           });

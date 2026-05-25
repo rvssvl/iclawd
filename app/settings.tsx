@@ -348,7 +348,7 @@ export default function SettingsScreen() {
             <View style={styles.divider} />
             <View style={styles.row}>
               <Text style={[styles.rowLabel, { fontSize: fontSize.sm, color: colors.textSecondary }]}>
-                Say "Hey Siri, Ask Claw" to launch voice mode
+                Say "Hey Siri, Clawd Voice" to launch voice mode
               </Text>
             </View>
           </View>
