@@ -1,8 +1,9 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { voiceEngine, type VoiceState } from '@/services/VoiceEngine';
+import { voiceEngine, type VoiceInputProvider, type VoiceState } from '@/services/VoiceEngine';
 
 export function useVoice() {
   const [voiceState, setVoiceState] = useState<VoiceState>('idle');
+  const [inputProvider, setInputProvider] = useState<VoiceInputProvider>(voiceEngine.inputProvider);
   const [transcript, setTranscript] = useState('');
   const [lastError, setLastError] = useState<string | null>(null);
   const onFinalTranscriptRef = useRef<((text: string) => void) | null>(null);
@@ -13,6 +14,7 @@ export function useVoice() {
     });
 
     const unsubState = voiceEngine.onStateChange(setVoiceState);
+    const unsubProvider = voiceEngine.onInputProviderChange(setInputProvider);
     const unsubTranscript = voiceEngine.onTranscript((text, isFinal) => {
       setTranscript(text);
       if (isFinal && text.trim()) {
@@ -24,6 +26,7 @@ export function useVoice() {
 
     return () => {
       unsubState();
+      unsubProvider();
       unsubTranscript();
       unsubError();
     };
@@ -84,6 +87,7 @@ export function useVoice() {
 
   return {
     voiceState,
+    inputProvider,
     transcript,
     lastError,
     startListening,

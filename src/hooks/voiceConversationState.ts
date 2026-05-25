@@ -83,7 +83,7 @@ export function voiceConversationReducer(
 }
 
 export function getVoiceOrbState(status: VoiceConversationStatus, voiceState: VoiceState): VoiceState {
-  if (voiceState === 'preparingAudio') return 'thinking';
+  if (voiceState === 'thinking' || voiceState === 'preparingAudio') return 'thinking';
   if (voiceState === 'speaking' || status === 'speaking') return 'speaking';
   if (status === 'listening' || status === 'starting') return 'listening';
   return 'idle';

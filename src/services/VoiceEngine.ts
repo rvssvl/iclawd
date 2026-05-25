@@ -3,18 +3,26 @@ import Voice, {
   SpeechErrorEvent,
 } from '@react-native-voice/voice';
 import { Audio } from 'expo-av';
+import type { RecordingStatus } from 'expo-av/build/Audio/Recording.types';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as SecureStore from 'expo-secure-store';
 import Tts, { TtsEvent } from 'react-native-tts';
+import {
+  ELEVENLABS_KEY,
+  ELEVENLABS_STT_ENABLED,
+  getElevenLabsTtsSettings,
+  isElevenLabsSttEnabled,
+} from '@/services/ElevenLabsConfig';
+import { ElevenLabsSpeechError, transcribeWithElevenLabs } from '@/services/ElevenLabsSpeechService';
 
 export type VoiceState = 'idle' | 'listening' | 'thinking' | 'preparingAudio' | 'speaking';
+export type VoiceInputProvider = 'system' | 'elevenlabs';
 
 type StateListener = (state: VoiceState) => void;
+type InputProviderListener = (provider: VoiceInputProvider) => void;
 type TranscriptListener = (text: string, isFinal: boolean) => void;
 type ErrorListener = (error: string) => void;
 
-const ELEVENLABS_KEY = 'iclawd_elevenlabs_key';
-const ELEVENLABS_VOICE_ID = 'JBFqnCBsd6RMkjVDRZzb'; // George
 const ELEVENLABS_MODEL = 'eleven_flash_v2_5';
 const ELEVENLABS_AUTH_FAILURE = /HTTP\s+(401|403)\b/i;
 
@@ -44,9 +52,11 @@ async function settleTtsOption(label: string, option: () => Promise<unknown>): P
 
 class VoiceEngineService {
   private stateListeners = new Set<StateListener>();
+  private inputProviderListeners = new Set<InputProviderListener>();
   private transcriptListeners = new Set<TranscriptListener>();
   private errorListeners = new Set<ErrorListener>();
   private _state: VoiceState = 'idle';
+  private _inputProvider: VoiceInputProvider = 'system';
   private initialized = false;
   private latestTranscript = '';
   private listeningStartedAt = 0;
@@ -58,10 +68,21 @@ class VoiceEngineService {
   private recognizing = false;
   private recognitionHandlersBound = false;
   private static SILENCE_TIMEOUT_MS = 1500;
+  private static STT_SILENCE_THRESHOLD_DB = -45;
+  private static STT_SPEECH_THRESHOLD_DB = -36;
+  private recording: Audio.Recording | null = null;
+  private recordingProvider: 'elevenlabs' | null = null;
+  private recordingHeardSpeech = false;
+  private recordingSilentSince = 0;
+  private transcriptionInProgress = false;
   private ttsCleanup: (() => void) | null = null;
 
   get state(): VoiceState {
     return this._state;
+  }
+
+  get inputProvider(): VoiceInputProvider {
+    return this._inputProvider;
   }
 
   async init(): Promise<void> {
@@ -101,6 +122,11 @@ class VoiceEngineService {
     return () => this.stateListeners.delete(listener);
   }
 
+  onInputProviderChange(listener: InputProviderListener): () => void {
+    this.inputProviderListeners.add(listener);
+    return () => this.inputProviderListeners.delete(listener);
+  }
+
   onTranscript(listener: TranscriptListener): () => void {
     this.transcriptListeners.add(listener);
     return () => this.transcriptListeners.delete(listener);
@@ -113,7 +139,6 @@ class VoiceEngineService {
 
   async startListening(continuous = false): Promise<void> {
     return this.enqueueOperation(async () => {
-      await this.initRecognition();
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
@@ -121,7 +146,7 @@ class VoiceEngineService {
       });
       this.continuousMode = continuous;
 
-      if (this._state === 'listening' || this.recognizing) {
+      if (this._state === 'listening' || this.recognizing || this.recording) {
         return;
       }
 
@@ -131,6 +156,14 @@ class VoiceEngineService {
       this.latestTranscript = '';
 
       await this.stopRecognition('cancel');
+
+      if (await isElevenLabsSttEnabled()) {
+        await this.startElevenLabsRecording();
+        return;
+      }
+
+      await this.initRecognition();
+      this.setInputProvider('system');
 
       this.listeningStartedAt = Date.now();
       this.setState('listening');
@@ -156,6 +189,10 @@ class VoiceEngineService {
     return this.enqueueOperation(async () => {
       this.continuousMode = false;
       this.clearSilenceTimer();
+      if (this.recordingProvider === 'elevenlabs' || this.recording) {
+        await this.finishElevenLabsRecording('manual');
+        return;
+      }
       if (this.latestTranscript.trim()) {
         const finalText = this.latestTranscript;
         this.latestTranscript = '';
@@ -310,11 +347,12 @@ class VoiceEngineService {
   private async speakWithElevenLabs(text: string, apiKey: string): Promise<void> {
     try {
       console.log('[VoiceEngine] ElevenLabs: starting request...');
+      const settings = await getElevenLabsTtsSettings();
 
       // Use XHR with arraybuffer responseType — most reliable binary method in RN Hermes
       const arrayBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        xhr.open('POST', `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`);
+        xhr.open('POST', `https://api.elevenlabs.io/v1/text-to-speech/${settings.voiceId}`);
         xhr.setRequestHeader('xi-api-key', apiKey);
         xhr.setRequestHeader('Content-Type', 'application/json');
         xhr.responseType = 'arraybuffer';
@@ -345,7 +383,11 @@ class VoiceEngineService {
         xhr.send(JSON.stringify({
           text,
           model_id: ELEVENLABS_MODEL,
-          voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+          voice_settings: {
+            stability: settings.stability,
+            similarity_boost: settings.similarityBoost,
+            speed: settings.speed,
+          },
         }));
       });
 
@@ -448,6 +490,7 @@ class VoiceEngineService {
       this.continuousMode = false;
       this.clearSilenceTimer();
       this.latestTranscript = '';
+      await this.finishElevenLabsRecording('cancel');
       await this.stopTts();
       await this.stopSound();
       await this.stopRecognition('cancel');
@@ -503,6 +546,7 @@ class VoiceEngineService {
       this.clearSilenceTimer();
       this.continuousMode = false;
       this.latestTranscript = '';
+      await this.finishElevenLabsRecording('cancel');
       try {
         await Voice.destroy();
       } catch {
@@ -525,6 +569,11 @@ class VoiceEngineService {
     this.stateListeners.forEach((l) => l(state));
   }
 
+  private setInputProvider(provider: VoiceInputProvider) {
+    this._inputProvider = provider;
+    this.inputProviderListeners.forEach((l) => l(provider));
+  }
+
   private resetSilenceTimer(): void {
     this.clearSilenceTimer();
     this.silenceTimer = setTimeout(() => {
@@ -541,6 +590,11 @@ class VoiceEngineService {
 
   private async handleSilenceTimeout(): Promise<void> {
     if (this._state !== 'listening') return;
+
+    if (this.recordingProvider === 'elevenlabs' || this.recording) {
+      await this.finishElevenLabsRecording('silence');
+      return;
+    }
 
     if (this.latestTranscript.trim()) {
       const finalText = this.latestTranscript;
@@ -657,6 +711,141 @@ class VoiceEngineService {
 
   private notifyError(message: string): void {
     this.errorListeners.forEach((l) => l(message));
+  }
+
+  private async startElevenLabsRecording(): Promise<void> {
+    const permission = await Audio.requestPermissionsAsync();
+    if (!permission.granted) {
+      throw new Error('Microphone permission is required.');
+    }
+
+    this.latestTranscript = '';
+    this.recordingHeardSpeech = false;
+    this.recordingSilentSince = 0;
+    this.transcriptionInProgress = false;
+    this.listeningStartedAt = Date.now();
+
+    try {
+      const recording = new Audio.Recording();
+      recording.setProgressUpdateInterval(250);
+      recording.setOnRecordingStatusUpdate((status) => {
+        this.handleElevenLabsRecordingStatus(status);
+      });
+      await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      await recording.startAsync();
+      this.recording = recording;
+      this.recordingProvider = 'elevenlabs';
+      this.setInputProvider('elevenlabs');
+      this.setState('listening');
+    } catch (error) {
+      this.recording = null;
+      this.recordingProvider = null;
+      console.warn('[VoiceEngine] Failed to start ElevenLabs recording:', error);
+      this.notifyError(error instanceof Error ? error.message : 'Could not start recording');
+      this.setState('idle');
+    }
+  }
+
+  private handleElevenLabsRecordingStatus(status: RecordingStatus): void {
+    if (!this.recording || this.recordingProvider !== 'elevenlabs' || this.transcriptionInProgress) return;
+    if (!status.isRecording) return;
+
+    const elapsed = status.durationMillis || (Date.now() - this.listeningStartedAt);
+    const metering = typeof status.metering === 'number' ? status.metering : null;
+    if (metering === null) return;
+
+    if (metering > VoiceEngineService.STT_SPEECH_THRESHOLD_DB) {
+      this.recordingHeardSpeech = true;
+      this.recordingSilentSince = 0;
+      return;
+    }
+
+    if (
+      !this.recordingHeardSpeech
+      || elapsed < VoiceEngineService.MIN_LISTEN_MS
+      || metering > VoiceEngineService.STT_SILENCE_THRESHOLD_DB
+    ) {
+      return;
+    }
+
+    if (!this.recordingSilentSince) {
+      this.recordingSilentSince = Date.now();
+      return;
+    }
+
+    if (Date.now() - this.recordingSilentSince >= VoiceEngineService.SILENCE_TIMEOUT_MS) {
+      this.enqueueOperation(() => this.finishElevenLabsRecording('silence')).catch((error) => {
+        console.warn('[VoiceEngine] Failed to finish ElevenLabs recording:', error);
+      });
+    }
+  }
+
+  private async finishElevenLabsRecording(reason: 'cancel' | 'manual' | 'silence'): Promise<void> {
+    const recording = this.recording;
+    if (!recording || this.transcriptionInProgress) return;
+
+    this.transcriptionInProgress = true;
+    this.recording = null;
+    this.recordingProvider = null;
+    this.recordingSilentSince = 0;
+
+    recording.setOnRecordingStatusUpdate(null);
+    const audioUri = recording.getURI();
+
+    try {
+      await recording.stopAndUnloadAsync();
+    } catch (error) {
+      console.warn('[VoiceEngine] Failed to stop ElevenLabs recording:', error);
+    }
+
+    if (reason === 'cancel') {
+      this.transcriptionInProgress = false;
+      this.setState('idle');
+      if (audioUri) {
+        FileSystem.deleteAsync(audioUri, { idempotent: true }).catch(() => {});
+      }
+      return;
+    }
+
+    if (!audioUri) {
+      this.transcriptionInProgress = false;
+      this.notifyError('Could not read microphone recording.');
+      this.setState('idle');
+      return;
+    }
+
+    this.setState('thinking');
+    try {
+      const apiKey = await SecureStore.getItemAsync(ELEVENLABS_KEY);
+      if (!apiKey?.trim()) {
+        throw new ElevenLabsSpeechError('ElevenLabs API key is missing.');
+      }
+
+      const text = await transcribeWithElevenLabs(audioUri, apiKey);
+      if (text) {
+        this.transcriptListeners.forEach((l) => l(text, true));
+      } else {
+        this.notifyError('I could not hear enough speech to transcribe.');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'ElevenLabs transcription failed.';
+      console.warn('[VoiceEngine] ElevenLabs STT failed:', message);
+
+      if (error instanceof ElevenLabsSpeechError && error.authFailure) {
+        await SecureStore.setItemAsync(ELEVENLABS_STT_ENABLED, 'false');
+        const { Alert } = require('react-native');
+        Alert.alert(
+          'ElevenLabs Speech Disabled',
+          'Your key was rejected for speech-to-text. I disabled ElevenLabs transcription and will use system dictation next time.',
+        );
+      }
+
+      this.notifyError(message);
+    } finally {
+      this.transcriptionInProgress = false;
+      this.setState('idle');
+      FileSystem.deleteAsync(audioUri, { idempotent: true }).catch(() => {});
+    }
   }
 
   private async stopRecognition(method: 'cancel' | 'stop'): Promise<void> {

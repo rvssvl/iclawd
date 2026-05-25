@@ -88,6 +88,7 @@ assert.equal(
 
 assert.equal(getVoiceOrbState('awaitingAgent', 'idle'), 'idle');
 assert.equal(getVoiceOrbState('agentStreaming', 'idle'), 'idle');
+assert.equal(getVoiceOrbState('listening', 'thinking'), 'thinking');
 assert.equal(getVoiceOrbState('recovering', 'preparingAudio'), 'thinking');
 assert.equal(getVoiceOrbState('listening', 'idle'), 'listening');
 assert.equal(getVoiceOrbState('paused', 'speaking'), 'speaking');

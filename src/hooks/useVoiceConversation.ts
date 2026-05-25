@@ -29,6 +29,7 @@ export function useVoiceConversation({
   const [state, dispatch] = useReducer(voiceConversationReducer, initialVoiceConversationState);
   const {
     voiceState,
+    inputProvider,
     transcript,
     lastError,
     startListening,
@@ -210,6 +211,11 @@ export function useVoiceConversation({
         return;
       }
 
+      if (inputProvider === 'elevenlabs') {
+        await stopListening();
+        return;
+      }
+
       dispatch({ type: 'PAUSE_MIC' });
       await suspend();
       return;
@@ -217,7 +223,7 @@ export function useVoiceConversation({
 
     pulse(Haptics.ImpactFeedbackStyle.Heavy);
     dispatch({ type: 'RESUME_MIC' });
-  }, [connectionState, pulse, reconnect, state.status, state.transcript, stopListening, stopSpeaking, suspend, transcript, voiceState]);
+  }, [connectionState, inputProvider, pulse, reconnect, state.status, state.transcript, stopListening, stopSpeaking, suspend, transcript, voiceState]);
 
   useEffect(() => {
     if (state.status !== 'starting') return;
@@ -237,6 +243,10 @@ export function useVoiceConversation({
   }, [suspend]);
 
   const statusLabel = (() => {
+    if (voiceState === 'thinking') {
+      return 'Transcribing...';
+    }
+
     switch (state.status) {
       case 'paused':
         return connectionState === 'connected' ? 'Paused. Tap to resume.' : 'Tap to reconnect';

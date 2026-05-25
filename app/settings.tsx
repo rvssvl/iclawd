@@ -8,8 +8,22 @@ import { colors, spacing, fontSize, borderRadius } from '@/constants/theme';
 import { getGatewayConfig, deleteGatewayConfig } from '@/services/SecureStorage';
 import { addSiriShortcut } from '@/services/SiriService';
 import type { GatewayConfig } from '@/types/gateway';
+import {
+  DEFAULT_ELEVENLABS_TTS_SIMILARITY,
+  DEFAULT_ELEVENLABS_TTS_SPEED,
+  DEFAULT_ELEVENLABS_TTS_STABILITY,
+  DEFAULT_ELEVENLABS_VOICE_ID,
+  ELEVENLABS_KEY,
+  ELEVENLABS_TTS_SIMILARITY,
+  ELEVENLABS_TTS_SPEED,
+  ELEVENLABS_TTS_STABILITY,
+  ELEVENLABS_TTS_VOICE_ID,
+  getElevenLabsTtsSettings,
+  isElevenLabsSttEnabled,
+  setElevenLabsSttEnabled,
+  saveElevenLabsTtsSetting,
+} from '@/services/ElevenLabsConfig';
 
-const ELEVENLABS_KEY = 'iclawd_elevenlabs_key';
 const KEY_AUTO_PRONOUNCE = 'iclawd_auto_pronounce';
 const KEY_NOTIFICATIONS = 'iclawd_notifications';
 
@@ -34,12 +48,24 @@ export default function SettingsScreen() {
   const [autoPronounce, setAutoPronounce] = useState(true);
   const [notifications, setNotifications] = useState(true);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [ttsVoiceId, setTtsVoiceId] = useState(DEFAULT_ELEVENLABS_VOICE_ID);
+  const [ttsSpeed, setTtsSpeed] = useState(String(DEFAULT_ELEVENLABS_TTS_SPEED));
+  const [ttsStability, setTtsStability] = useState(String(DEFAULT_ELEVENLABS_TTS_STABILITY));
+  const [ttsSimilarity, setTtsSimilarity] = useState(String(DEFAULT_ELEVENLABS_TTS_SIMILARITY));
+  const [elevenLabsStt, setElevenLabsStt] = useState(false);
 
   useEffect(() => {
     getGatewayConfig().then(setConfig);
     getElevenLabsKey().then((k) => { if (k) setElevenLabsKey(k); });
+    getElevenLabsTtsSettings().then((settings) => {
+      setTtsVoiceId(settings.voiceId);
+      setTtsSpeed(String(settings.speed));
+      setTtsStability(String(settings.stability));
+      setTtsSimilarity(String(settings.similarityBoost));
+    });
     SecureStore.getItemAsync(KEY_AUTO_PRONOUNCE).then((v) => setAutoPronounce(v !== 'false'));
     SecureStore.getItemAsync(KEY_NOTIFICATIONS).then((v) => setNotifications(v !== 'false'));
+    isElevenLabsSttEnabled().then(setElevenLabsStt);
   }, []);
 
   function handleDisconnect() {
@@ -68,6 +94,10 @@ export default function SettingsScreen() {
   async function handleSaveKey() {
     await saveElevenLabsKey(keyInput);
     setElevenLabsKey(keyInput.trim());
+    if (!keyInput.trim()) {
+      await setElevenLabsSttEnabled(false);
+      setElevenLabsStt(false);
+    }
     setEditingKey(false);
   }
 
@@ -84,7 +114,9 @@ export default function SettingsScreen() {
         style: 'destructive',
         onPress: async () => {
           await saveElevenLabsKey('');
+          await setElevenLabsSttEnabled(false);
           setElevenLabsKey('');
+          setElevenLabsStt(false);
         },
       },
     ]);
@@ -98,6 +130,16 @@ export default function SettingsScreen() {
   async function toggleNotifications(value: boolean) {
     setNotifications(value);
     await SecureStore.setItemAsync(KEY_NOTIFICATIONS, String(value));
+  }
+
+  async function toggleElevenLabsStt(value: boolean) {
+    setElevenLabsStt(value);
+    await setElevenLabsSttEnabled(value);
+  }
+
+  async function saveTtsSetting(key: string, value: string, setValue: (value: string) => void) {
+    await saveElevenLabsTtsSetting(key, value);
+    setValue(value.trim());
   }
 
   async function handleCheckForUpdates() {
@@ -179,6 +221,11 @@ export default function SettingsScreen() {
           <Text style={styles.rowValue}>{elevenLabsKey ? 'ElevenLabs' : 'System Voice'}</Text>
         </View>
         <View style={styles.divider} />
+        <View style={styles.row}>
+          <Text style={styles.rowLabel}>Speech-to-Text</Text>
+          <Text style={styles.rowValue}>{elevenLabsKey && elevenLabsStt ? 'ElevenLabs' : 'System'}</Text>
+        </View>
+        <View style={styles.divider} />
         {editingKey ? (
           <View style={styles.keyEditContainer}>
             <TextInput
@@ -218,6 +265,75 @@ export default function SettingsScreen() {
             )}
           </Pressable>
         )}
+        {elevenLabsKey ? (
+          <>
+            <View style={styles.divider} />
+            <View style={styles.row}>
+              <View>
+                <Text style={styles.rowLabel}>ElevenLabs STT</Text>
+                <Text style={styles.rowDescription}>Use API transcription for voice and dictation.</Text>
+              </View>
+              <Switch
+                value={elevenLabsStt}
+                onValueChange={toggleElevenLabsStt}
+                trackColor={{ false: colors.border, true: colors.primary }}
+              />
+            </View>
+            <View style={styles.divider} />
+            <View style={styles.settingInputRow}>
+              <Text style={styles.rowLabel}>Voice ID</Text>
+              <TextInput
+                style={styles.inlineInput}
+                value={ttsVoiceId}
+                onChangeText={setTtsVoiceId}
+                onBlur={() => saveTtsSetting(ELEVENLABS_TTS_VOICE_ID, ttsVoiceId, setTtsVoiceId)}
+                placeholder={DEFAULT_ELEVENLABS_VOICE_ID}
+                placeholderTextColor={colors.textMuted}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+            </View>
+            <View style={styles.divider} />
+            <View style={styles.settingInputRow}>
+              <Text style={styles.rowLabel}>Speed</Text>
+              <TextInput
+                style={styles.numberInput}
+                value={ttsSpeed}
+                onChangeText={setTtsSpeed}
+                onBlur={() => saveTtsSetting(ELEVENLABS_TTS_SPEED, ttsSpeed, setTtsSpeed)}
+                keyboardType="decimal-pad"
+                placeholder="1"
+                placeholderTextColor={colors.textMuted}
+              />
+            </View>
+            <View style={styles.divider} />
+            <View style={styles.settingInputRow}>
+              <Text style={styles.rowLabel}>Stability</Text>
+              <TextInput
+                style={styles.numberInput}
+                value={ttsStability}
+                onChangeText={setTtsStability}
+                onBlur={() => saveTtsSetting(ELEVENLABS_TTS_STABILITY, ttsStability, setTtsStability)}
+                keyboardType="decimal-pad"
+                placeholder="0.5"
+                placeholderTextColor={colors.textMuted}
+              />
+            </View>
+            <View style={styles.divider} />
+            <View style={styles.settingInputRow}>
+              <Text style={styles.rowLabel}>Similarity</Text>
+              <TextInput
+                style={styles.numberInput}
+                value={ttsSimilarity}
+                onChangeText={setTtsSimilarity}
+                onBlur={() => saveTtsSetting(ELEVENLABS_TTS_SIMILARITY, ttsSimilarity, setTtsSimilarity)}
+                keyboardType="decimal-pad"
+                placeholder="0.75"
+                placeholderTextColor={colors.textMuted}
+              />
+            </View>
+          </>
+        ) : null}
       </View>
 
       {/* Siri Section (iOS only) */}
@@ -338,6 +454,47 @@ const styles = StyleSheet.create({
     fontSize: fontSize.sm,
     color: colors.textSecondary,
     maxWidth: '60%',
+    textAlign: 'right',
+  },
+  rowDescription: {
+    fontSize: fontSize.xs,
+    color: colors.textMuted,
+    marginTop: 2,
+    maxWidth: 220,
+  },
+  settingInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    minHeight: 48,
+    gap: spacing.md,
+  },
+  inlineInput: {
+    flex: 1,
+    minHeight: 36,
+    backgroundColor: colors.background,
+    color: colors.text,
+    fontSize: fontSize.sm,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    textAlign: 'right',
+  },
+  numberInput: {
+    width: 88,
+    minHeight: 36,
+    backgroundColor: colors.background,
+    color: colors.text,
+    fontSize: fontSize.sm,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
     textAlign: 'right',
   },
   divider: {

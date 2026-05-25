@@ -204,7 +204,12 @@ export default function ChatScreen() {
           <Pressable
             style={[styles.voiceButton, dictating && styles.voiceButtonActive]}
             onPress={toggleDictation}
-            disabled={connectionState !== 'connected' || voiceState === 'speaking' || voiceState === 'preparingAudio'}
+            disabled={
+              connectionState !== 'connected'
+              || voiceState === 'speaking'
+              || voiceState === 'preparingAudio'
+              || voiceState === 'thinking'
+            }
           >
             <Ionicons
               name={dictating || voiceState === 'listening' ? 'stop' : 'mic'}
@@ -219,14 +224,14 @@ export default function ChatScreen() {
             value={input}
             onChangeText={setInput}
             placeholder={dictating
-              ? 'Listening...'
+              ? voiceState === 'thinking' ? 'Transcribing...' : 'Listening...'
               : connectionState === 'connected'
                 ? 'Message your agent...'
                 : 'Not connected'}
             placeholderTextColor={colors.textMuted}
             multiline
             maxLength={4000}
-            editable={connectionState === 'connected' && !dictating}
+            editable={connectionState === 'connected' && !dictating && voiceState !== 'thinking'}
           />
 
           {voiceState === 'speaking' || voiceState === 'preparingAudio' ? (
