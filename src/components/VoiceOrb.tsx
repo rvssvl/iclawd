@@ -24,22 +24,51 @@ interface Props {
   onTap: () => void;
   disabled?: boolean;
   connecting?: boolean;
+  busy?: boolean;
+  statusLabel?: string;
 }
 
-export function VoiceOrb({ state, transcript, onTap, disabled, connecting }: Props) {
+export function VoiceOrb({ state, transcript, onTap, disabled, connecting, busy, statusLabel }: Props) {
   const orbScale = useSharedValue(1);
   const glowOpacity = useSharedValue(0);
   const glowScale = useSharedValue(1);
 
-  // Processing state: thinking or speaking → glow around mic
-  const isProcessing = state === 'thinking' || state === 'speaking';
+  const isListening = state === 'listening';
+  const isProcessing = state === 'thinking' || state === 'preparingAudio' || state === 'speaking';
+  const iconName = state === 'speaking'
+    ? 'volume-high'
+    : state === 'listening'
+      ? 'stop'
+      : 'mic';
+  const accessibilityLabel = state === 'speaking'
+    ? 'Stop audio playback'
+    : state === 'listening'
+      ? 'Stop recording'
+      : 'Start microphone';
 
   // Glow animation for processing and connecting
   useEffect(() => {
     cancelAnimation(glowOpacity);
     cancelAnimation(glowScale);
 
-    if (isProcessing) {
+    if (isListening) {
+      glowOpacity.value = withRepeat(
+        withSequence(
+          withTiming(0.9, { duration: 550, easing: Easing.inOut(Easing.ease) }),
+          withTiming(0.25, { duration: 550, easing: Easing.inOut(Easing.ease) }),
+        ),
+        -1,
+        true,
+      );
+      glowScale.value = withRepeat(
+        withSequence(
+          withTiming(1.25, { duration: 550, easing: Easing.inOut(Easing.ease) }),
+          withTiming(1.03, { duration: 550, easing: Easing.inOut(Easing.ease) }),
+        ),
+        -1,
+        true,
+      );
+    } else if (isProcessing) {
       // Steady pulsing glow when processing
       glowOpacity.value = withRepeat(
         withSequence(
@@ -72,7 +101,7 @@ export function VoiceOrb({ state, transcript, onTap, disabled, connecting }: Pro
       glowOpacity.value = withTiming(0, { duration: 300 });
       glowScale.value = withTiming(1, { duration: 300 });
     }
-  }, [isProcessing, connecting]);
+  }, [isListening, isProcessing, connecting]);
 
   // Orb scale animation
   useEffect(() => {
@@ -102,9 +131,13 @@ export function VoiceOrb({ state, transcript, onTap, disabled, connecting }: Pro
       ? colors.voiceListening
       : isProcessing
         ? colors.voiceThinking
-        : colors.voiceIdle;
+        : colors.primary;
 
-  const glowColor = isProcessing ? colors.voiceThinking : colors.voiceIdle;
+  const glowColor = isListening
+    ? colors.voiceListening
+    : isProcessing
+      ? colors.voiceThinking
+      : colors.voiceIdle;
 
   return (
     <View style={styles.container}>
@@ -126,7 +159,13 @@ export function VoiceOrb({ state, transcript, onTap, disabled, connecting }: Pro
           ]}
         />
 
-        <Pressable onPress={disabled ? undefined : onTap} disabled={disabled}>
+        <Pressable
+          onPress={onTap}
+          disabled={connecting || busy}
+          hitSlop={16}
+          accessibilityRole="button"
+          accessibilityLabel={accessibilityLabel}
+        >
           <Animated.View
             style={[
               styles.orb,
@@ -134,13 +173,13 @@ export function VoiceOrb({ state, transcript, onTap, disabled, connecting }: Pro
               {
                 backgroundColor: orbColor,
                 shadowColor: orbColor,
-                shadowOpacity: disabled ? 0.1 : 0.4,
-                shadowRadius: disabled ? 6 : 16,
+                shadowOpacity: disabled ? 0.15 : 0.4,
+                shadowRadius: disabled ? 8 : 16,
               },
             ]}
           >
             <Ionicons
-              name={state === 'speaking' ? 'stop' : 'mic'}
+              name={iconName}
               size={36}
               color={disabled ? '#999' : '#FFF'}
             />
@@ -149,9 +188,19 @@ export function VoiceOrb({ state, transcript, onTap, disabled, connecting }: Pro
       </View>
 
       {/* Hint label */}
-      {state === 'speaking' && (
-        <Text style={styles.hintLabel}>Tap to skip</Text>
-      )}
+      {statusLabel ? (
+        <Text style={styles.hintLabel}>{statusLabel}</Text>
+      ) : state === 'speaking' ? (
+        <Text style={styles.hintLabel}>Playing audio. Tap to stop.</Text>
+      ) : state === 'idle' && !connecting && !disabled ? (
+        <Text style={styles.hintLabel}>Tap to speak</Text>
+      ) : state === 'listening' ? (
+        <Text style={[styles.hintLabel, styles.listeningLabel]}>Listening. Tap to send.</Text>
+      ) : connecting ? (
+        <Text style={styles.hintLabel}>Connecting...</Text>
+      ) : disabled && !connecting ? (
+        <Text style={styles.hintLabel}>Tap to reconnect</Text>
+      ) : null}
     </View>
   );
 }
@@ -200,5 +249,9 @@ const styles = StyleSheet.create({
     fontSize: fontSize.sm,
     color: colors.textMuted,
     marginTop: -spacing.xs,
+  },
+  listeningLabel: {
+    color: colors.voiceListening,
+    fontWeight: '600',
   },
 });

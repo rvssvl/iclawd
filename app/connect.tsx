@@ -15,6 +15,7 @@ import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, fontSize, borderRadius } from '@/constants/theme';
 import { saveGatewayConfig } from '@/services/SecureStorage';
+import { GatewayClient } from '@/services/GatewayClient';
 import { donateSiriShortcut } from '@/services/SiriService';
 
 export default function ConnectScreen() {
@@ -36,20 +37,20 @@ export default function ConnectScreen() {
       return;
     }
 
-    // Normalize URL: ensure ws:// or wss://
-    let wsUrl = trimmedUrl;
-    if (wsUrl.startsWith('http://')) {
-      wsUrl = wsUrl.replace('http://', 'ws://');
-    } else if (wsUrl.startsWith('https://')) {
-      wsUrl = wsUrl.replace('https://', 'wss://');
-    } else if (!wsUrl.startsWith('ws://') && !wsUrl.startsWith('wss://')) {
-      wsUrl = `wss://${wsUrl}`;
+    const wsUrl = normalizeGatewayUrl(trimmedUrl);
+
+    if (Platform.OS !== 'web' && isLocalhostUrl(wsUrl)) {
+      Alert.alert(
+        'Use a reachable gateway URL',
+        '127.0.0.1 and localhost point to this phone, not your OpenClaw computer. Use your computer LAN IP, Tailscale IP, or PrimeClaws URL instead, such as ws://100.x.x.x:18789.',
+      );
+      return;
     }
 
     setConnecting(true);
     try {
-      // Quick connectivity test — try to open WebSocket
-      const testResult = await testConnection(wsUrl);
+      // Validate the authenticated OpenClaw handshake before saving.
+      const testResult = await testConnection(wsUrl, trimmedToken);
       if (!testResult.ok) {
         Alert.alert('Connection Failed', testResult.error || 'Could not reach the gateway.');
         setConnecting(false);
@@ -84,7 +85,8 @@ export default function ConnectScreen() {
         <View style={styles.infoCard}>
           <Ionicons name="information-circle" size={20} color={colors.info} />
           <Text style={styles.infoText}>
-            Find your gateway URL and token in your OpenClaw dashboard or terminal output.
+            Use a URL your phone can reach, such as a PrimeClaws URL, Tailscale IP, or LAN IP.
+            127.0.0.1 only works on the device running OpenClaw.
           </Text>
         </View>
 
@@ -94,7 +96,7 @@ export default function ConnectScreen() {
           style={styles.input}
           value={url}
           onChangeText={setUrl}
-          placeholder="gateway.example.com:18789"
+          placeholder="100.x.x.x:18789 or gateway.example.com"
           placeholderTextColor={colors.textMuted}
           autoCapitalize="none"
           autoCorrect={false}
@@ -140,28 +142,70 @@ export default function ConnectScreen() {
   );
 }
 
-async function testConnection(wsUrl: string): Promise<{ ok: boolean; error?: string }> {
-  return new Promise((resolve) => {
-    const timeout = setTimeout(() => {
-      resolve({ ok: false, error: 'Connection timed out after 5 seconds.' });
-    }, 5000);
+function normalizeGatewayUrl(rawUrl: string): string {
+  const url = rawUrl.trim();
+  if (url.startsWith('http://')) {
+    return url.replace('http://', 'ws://');
+  }
+  if (url.startsWith('https://')) {
+    return url.replace('https://', 'wss://');
+  }
+  if (url.startsWith('ws://') || url.startsWith('wss://')) {
+    return url;
+  }
 
-    try {
-      const ws = new WebSocket(wsUrl);
-      ws.onopen = () => {
-        clearTimeout(timeout);
-        ws.close();
-        resolve({ ok: true });
-      };
-      ws.onerror = () => {
-        clearTimeout(timeout);
-        resolve({ ok: false, error: 'Could not reach the gateway. Check your URL.' });
-      };
-    } catch {
-      clearTimeout(timeout);
-      resolve({ ok: false, error: 'Invalid URL format.' });
-    }
+  return `${shouldDefaultToPlainWebSocket(url) ? 'ws' : 'wss'}://${url}`;
+}
+
+function shouldDefaultToPlainWebSocket(urlWithoutScheme: string): boolean {
+  const host = urlWithoutScheme.split('/')[0].split(':')[0].toLowerCase();
+  return isLocalhostHost(host)
+    || isIPv4Host(host)
+    || host.endsWith('.local')
+    || !host.includes('.');
+}
+
+function isLocalhostUrl(wsUrl: string): boolean {
+  try {
+    return isLocalhostHost(new URL(wsUrl).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function isLocalhostHost(host: string): boolean {
+  return host === 'localhost'
+    || host === '127.0.0.1'
+    || host === '0.0.0.0'
+    || host === '::1'
+    || host === '[::1]';
+}
+
+function isIPv4Host(host: string): boolean {
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host);
+}
+
+async function testConnection(wsUrl: string, token: string): Promise<{ ok: boolean; error?: string }> {
+  const client = new GatewayClient({
+    url: wsUrl,
+    token,
+    name: 'Connection Test',
   });
+
+  try {
+    await client.connect();
+    return { ok: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Could not connect to the gateway.';
+    return {
+      ok: false,
+      error: message === 'WebSocket error'
+        ? 'Could not reach the gateway. Check your URL.'
+        : message,
+    };
+  } finally {
+    client.disconnect();
+  }
 }
 
 const styles = StyleSheet.create({

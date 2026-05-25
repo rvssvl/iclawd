@@ -29,6 +29,7 @@ const KEY_KEYPAIR_SECRET = 'iclawd_keypair_sec';
 type ConnectionListener = (state: ConnectionState) => void;
 type MessageListener = (message: ChatMessage) => void;
 type StreamListener = (partialText: string, messageId: string) => void;
+type ActivityListener = (active: boolean) => void;
 
 let idCounter = 0;
 function nextId(): string {
@@ -157,6 +158,7 @@ export class GatewayClient {
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private tickWatchTimer: ReturnType<typeof setTimeout> | null = null;
+  private connectTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private tickIntervalMs = TICK_DEFAULT_MS;
   private pendingRequests = new Map<string, {
     resolve: (payload: Record<string, unknown>) => void;
@@ -165,7 +167,10 @@ export class GatewayClient {
   private connectionListeners = new Set<ConnectionListener>();
   private messageListeners = new Set<MessageListener>();
   private streamListeners = new Set<StreamListener>();
+  private activityListeners = new Set<ActivityListener>();
   private disposed = false;
+  private supportedMethods = new Set<string>();
+  private authScopes = new Set<string>();
 
   private connectResolve: (() => void) | null = null;
   private connectReject: ((err: Error) => void) | null = null;
@@ -195,6 +200,11 @@ export class GatewayClient {
     return () => this.streamListeners.delete(listener);
   }
 
+  onActivity(listener: ActivityListener): () => void {
+    this.activityListeners.add(listener);
+    return () => this.activityListeners.delete(listener);
+  }
+
   async connect(): Promise<void> {
     if (this.disposed) return;
     this.setState('connecting');
@@ -212,10 +222,14 @@ export class GatewayClient {
           headers: { Origin: origin },
         });
 
-        const timeout = setTimeout(() => {
+        this.clearConnectTimeout();
+        this.connectTimeoutTimer = setTimeout(() => {
+          const rejectConnect = this.connectReject;
           this.connectResolve = null;
           this.connectReject = null;
-          reject(new Error('Connection timeout'));
+          this.connectRequestId = null;
+          this.setState('error');
+          rejectConnect?.(new Error('Connection timeout'));
           this.ws?.close();
         }, 15000);
 
@@ -230,21 +244,25 @@ export class GatewayClient {
         };
 
         ws.onerror = () => {
-          clearTimeout(timeout);
+          this.clearConnectTimeout();
           if (this.connectReject) {
             this.connectReject(new Error('WebSocket error'));
             this.connectResolve = null;
             this.connectReject = null;
+            this.connectRequestId = null;
+            this.setState('error');
           }
         };
 
         ws.onclose = () => {
-          clearTimeout(timeout);
+          this.clearConnectTimeout();
           this.stopTickWatch();
           if (this.connectReject) {
             this.connectReject(new Error('Connection closed'));
             this.connectResolve = null;
             this.connectReject = null;
+            this.connectRequestId = null;
+            this.setState('disconnected');
           }
           if (!this.disposed && this.state !== 'disconnected') {
             this.scheduleReconnect();
@@ -258,6 +276,7 @@ export class GatewayClient {
 
   disconnect(): void {
     this.disposed = true;
+    this.clearConnectTimeout();
     this.stopTickWatch();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -279,7 +298,14 @@ export class GatewayClient {
   }
 
   async stopChat(): Promise<void> {
+    if (!this.canStopChat()) {
+      return;
+    }
     await this.rpc('chat.stop', {});
+  }
+
+  canStopChat(): boolean {
+    return this.supportedMethods.has('chat.stop') && this.authScopes.has('operator.admin');
   }
 
   async getStatus(): Promise<Record<string, unknown>> {
@@ -352,6 +378,7 @@ export class GatewayClient {
 
   private async handleConnectResponse(frame: ResponseFrame): Promise<void> {
     console.log('[Gateway] Connect response:', JSON.stringify(frame).substring(0, 500));
+    this.clearConnectTimeout();
     if (frame.ok) {
       const payload = frame.payload as unknown as HelloOkPayload;
       if (payload?.policy?.tickIntervalMs) {
@@ -360,6 +387,8 @@ export class GatewayClient {
       if (payload?.auth?.deviceToken) {
         await updateDeviceToken(payload.auth.deviceToken);
       }
+      this.supportedMethods = new Set(payload?.features?.methods || []);
+      this.authScopes = new Set(payload?.auth?.scopes || []);
       this.setState('connected');
       this.reconnectAttempts = 0;
       this.startTickWatch();
@@ -367,6 +396,7 @@ export class GatewayClient {
     } else {
       const errMsg = frame.error?.message || 'Connection rejected';
       this.connectReject?.(new Error(errMsg));
+      this.setState('error');
     }
     this.connectResolve = null;
     this.connectReject = null;
@@ -480,8 +510,8 @@ export class GatewayClient {
           this.streamListeners.forEach((l) => l(delta, runId));
         }
 
-        if (stream === 'lifecycle' && data.phase === 'end') {
-          // Agent finished — no action needed, chat final event handles it
+        if (stream === 'lifecycle') {
+          this.activityListeners.forEach((l) => l(data.phase !== 'end'));
         }
         break;
       }
@@ -492,6 +522,7 @@ export class GatewayClient {
         const message = (payload.message as Record<string, unknown>) || {};
 
         if (state === 'final') {
+          this.activityListeners.forEach((l) => l(false));
           // Extract text from content array
           const content = (message.content as Array<{ type: string; text: string }>) || [];
           const text = content
@@ -554,6 +585,13 @@ export class GatewayClient {
     if (this.tickWatchTimer) {
       clearTimeout(this.tickWatchTimer);
       this.tickWatchTimer = null;
+    }
+  }
+
+  private clearConnectTimeout(): void {
+    if (this.connectTimeoutTimer) {
+      clearTimeout(this.connectTimeoutTimer);
+      this.connectTimeoutTimer = null;
     }
   }
 }

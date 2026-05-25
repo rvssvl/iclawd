@@ -2,23 +2,50 @@ import Voice, {
   SpeechResultsEvent,
   SpeechErrorEvent,
 } from '@react-native-voice/voice';
-import * as Speech from 'expo-speech';
 import { Audio } from 'expo-av';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as SecureStore from 'expo-secure-store';
+import Tts, { TtsEvent } from 'react-native-tts';
 
-export type VoiceState = 'idle' | 'listening' | 'thinking' | 'speaking';
+export type VoiceState = 'idle' | 'listening' | 'thinking' | 'preparingAudio' | 'speaking';
 
 type StateListener = (state: VoiceState) => void;
 type TranscriptListener = (text: string, isFinal: boolean) => void;
+type ErrorListener = (error: string) => void;
 
 const ELEVENLABS_KEY = 'iclawd_elevenlabs_key';
 const ELEVENLABS_VOICE_ID = 'JBFqnCBsd6RMkjVDRZzb'; // George
 const ELEVENLABS_MODEL = 'eleven_flash_v2_5';
+const ELEVENLABS_AUTH_FAILURE = /HTTP\s+(401|403)\b/i;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Timed out')), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function settleTtsOption(label: string, option: () => Promise<unknown>): Promise<void> {
+  try {
+    await option();
+  } catch (error) {
+    console.warn(`[VoiceEngine] Ignoring native TTS option failure (${label}):`, error);
+  }
+}
 
 class VoiceEngineService {
   private stateListeners = new Set<StateListener>();
   private transcriptListeners = new Set<TranscriptListener>();
+  private errorListeners = new Set<ErrorListener>();
   private _state: VoiceState = 'idle';
   private initialized = false;
   private latestTranscript = '';
@@ -27,26 +54,44 @@ class VoiceEngineService {
   private sound: Audio.Sound | null = null;
   private continuousMode = false;
   private silenceTimer: ReturnType<typeof setTimeout> | null = null;
+  private operationQueue: Promise<void> = Promise.resolve();
+  private recognizing = false;
+  private recognitionHandlersBound = false;
   private static SILENCE_TIMEOUT_MS = 1500;
+  private ttsCleanup: (() => void) | null = null;
 
   get state(): VoiceState {
     return this._state;
   }
 
   async init(): Promise<void> {
-    if (this.initialized) return;
+    await this.initRecognition();
+  }
+
+  private bindRecognitionHandlers(): void {
+    if (this.recognitionHandlersBound) return;
 
     Voice.onSpeechResults = this.onSpeechResults.bind(this);
     Voice.onSpeechPartialResults = this.onSpeechPartial.bind(this);
     Voice.onSpeechError = this.onSpeechError.bind(this);
     Voice.onSpeechEnd = this.onSpeechEnd.bind(this);
+    this.recognitionHandlersBound = true;
+  }
 
-    // Configure audio session for playback + recording
+  private async initRecognition(): Promise<void> {
+    if (this.initialized) return;
+
+    this.bindRecognitionHandlers();
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: true,
       playsInSilentModeIOS: true,
       staysActiveInBackground: false,
     });
+
+    const available = await Voice.isAvailable();
+    if (!available) {
+      throw new Error('Speech recognition is not available on this device.');
+    }
 
     this.initialized = true;
   }
@@ -61,56 +106,184 @@ class VoiceEngineService {
     return () => this.transcriptListeners.delete(listener);
   }
 
+  onError(listener: ErrorListener): () => void {
+    this.errorListeners.add(listener);
+    return () => this.errorListeners.delete(listener);
+  }
+
   async startListening(continuous = false): Promise<void> {
-    await this.init();
-    this.continuousMode = continuous;
-    this.clearSilenceTimer();
-    await this.stopSound();
-    Speech.stop();
-    this.latestTranscript = '';
-    this.listeningStartedAt = Date.now();
-    this.setState('listening');
-    try {
-      await Voice.start('en-US');
-    } catch (e) {
-      console.warn('[VoiceEngine] Failed to start listening:', e);
-      this.setState('idle');
-    }
+    return this.enqueueOperation(async () => {
+      await this.initRecognition();
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: false,
+      });
+      this.continuousMode = continuous;
+
+      if (this._state === 'listening' || this.recognizing) {
+        return;
+      }
+
+      this.clearSilenceTimer();
+      await this.stopSound();
+      await this.stopTts();
+      this.latestTranscript = '';
+
+      await this.stopRecognition('cancel');
+
+      this.listeningStartedAt = Date.now();
+      this.setState('listening');
+
+      try {
+        this.recognizing = true;
+        await Voice.start('en-US');
+      } catch (e) {
+        if (this.isAlreadyStartedError(e)) {
+          this.recognizing = true;
+          this.setState('listening');
+          return;
+        }
+        this.recognizing = false;
+        console.warn('[VoiceEngine] Failed to start listening:', e);
+        this.notifyError(e instanceof Error ? e.message : 'Failed to start listening');
+        this.setState('idle');
+      }
+    });
   }
 
   async stopListening(): Promise<void> {
-    this.continuousMode = false;
-    this.clearSilenceTimer();
-    try {
-      await Voice.stop();
-    } catch {
-      // Ignore
-    }
+    return this.enqueueOperation(async () => {
+      this.continuousMode = false;
+      this.clearSilenceTimer();
+      if (this.latestTranscript.trim()) {
+        const finalText = this.latestTranscript;
+        this.latestTranscript = '';
+        this.transcriptListeners.forEach((l) => l(finalText, true));
+      }
+      this.latestTranscript = '';
+      await this.stopRecognition('stop');
+      if (this._state === 'listening') {
+        this.setState('idle');
+      }
+    });
   }
 
   async speak(text: string): Promise<void> {
-    await this.init();
-    this.setState('speaking');
+    await this.prepareForPlayback();
+    this.setState('preparingAudio');
 
     const elevenLabsKey = await SecureStore.getItemAsync(ELEVENLABS_KEY);
     console.log('[VoiceEngine] speak() — ElevenLabs:', elevenLabsKey ? 'configured' : 'not set');
     if (elevenLabsKey) {
       await this.speakWithElevenLabs(text, elevenLabsKey);
     } else {
-      this.speakWithSystem(text);
+      await this.speakWithSystem(text);
     }
   }
 
-  private speakWithSystem(text: string): void {
-    Speech.speak(text, {
-      language: 'en-US',
-      rate: 0.9,
-      pitch: 1.0,
-      onStart: () => this.setState('speaking'),
-      onDone: () => this.onSpeechDone(),
-      onStopped: () => this.onSpeechDone(),
-      onError: () => this.onSpeechDone(),
+  private async speakWithSystem(text: string): Promise<void> {
+    await this.stopTts();
+
+    let initStatus: Promise<'success'>;
+    try {
+      initStatus = Tts.getInitStatus();
+    } catch (error) {
+      console.warn('[VoiceEngine] Native TTS init threw:', error);
+      this.onSpeechDone();
+      return;
+    }
+
+    const ttsReady = await withTimeout(initStatus, 2000).then(
+      () => true,
+      (error) => {
+        console.warn('[VoiceEngine] Native TTS init failed:', error);
+        return false;
+      },
+    );
+    if (!ttsReady) {
+      this.setState('idle');
+      return;
+    }
+
+    await Promise.all([
+      settleTtsOption('ignoreSilentSwitch', () => Tts.setIgnoreSilentSwitch('ignore')),
+      settleTtsOption('language', () => Tts.setDefaultLanguage('en-US')),
+      settleTtsOption('rate', () => Tts.setDefaultRate(0.48)),
+      settleTtsOption('pitch', () => Tts.setDefaultPitch(1.0)),
+    ]);
+
+    await Audio.setAudioModeAsync({
+      allowsRecordingIOS: false,
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: false,
     });
+    let started = false;
+    let completed = false;
+    let utteranceId: string | number | null = null;
+
+    const matchesUtterance = (event: TtsEvent | { utteranceId?: string | number }) => {
+      if (!utteranceId || !('utteranceId' in event)) return true;
+      return String(event.utteranceId) === String(utteranceId);
+    };
+
+    const cleanup = () => {
+      clearTimeout(startWatchdog);
+      try {
+        Tts.removeEventListener('tts-start', handleStart);
+        Tts.removeEventListener('tts-finish', handleFinish);
+        Tts.removeEventListener('tts-cancel', handleFinish);
+      } catch {
+        // Some native emitters throw during teardown after failed setup.
+      }
+      if (this.ttsCleanup === cleanup) {
+        this.ttsCleanup = null;
+      }
+    };
+
+    const finish = () => {
+      if (completed) return;
+      completed = true;
+      cleanup();
+      this.onSpeechDone();
+    };
+
+    const handleStart = (event: TtsEvent) => {
+      if (!matchesUtterance(event) || completed) return;
+      started = true;
+      clearTimeout(startWatchdog);
+      this.setState('speaking');
+    };
+
+    const handleFinish = (event: TtsEvent) => {
+      if (!matchesUtterance(event)) return;
+      finish();
+    };
+
+    const startWatchdog = setTimeout(() => {
+      if (started || completed) return;
+      console.warn('[VoiceEngine] Native TTS did not report playback start.');
+      this.stopNativeTts();
+      finish();
+    }, 2500);
+
+    try {
+      Tts.addEventListener('tts-start', handleStart);
+      Tts.addEventListener('tts-finish', handleFinish);
+      Tts.addEventListener('tts-cancel', handleFinish);
+      this.ttsCleanup = cleanup;
+    } catch (error) {
+      console.warn('[VoiceEngine] Failed to subscribe to native TTS events:', error);
+      finish();
+      return;
+    }
+
+    try {
+      utteranceId = Tts.speak(text);
+    } catch (error) {
+      console.warn('[VoiceEngine] Failed to queue native TTS:', error);
+      finish();
+    }
   }
 
   private elevenLabsFailShown = false;
@@ -183,6 +356,12 @@ class VoiceEngineService {
         throw new Error('Empty audio response');
       }
 
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: false,
+      });
+
       // Encode to base64 using pure JS encoder (Hermes-safe, no btoa)
       const base64Audio = VoiceEngineService.toBase64(bytes);
       console.log('[VoiceEngine] ElevenLabs: base64 length:', base64Audio.length);
@@ -203,6 +382,7 @@ class VoiceEngineService {
       );
       this.sound = sound;
       console.log('[VoiceEngine] ElevenLabs: playing!');
+      this.setState('speaking');
 
       sound.setOnPlaybackStatusUpdate((status) => {
         if ('didJustFinish' in status && status.didJustFinish) {
@@ -213,21 +393,33 @@ class VoiceEngineService {
     } catch (e: unknown) {
       const errMsg = e instanceof Error ? e.message : String(e);
       console.warn('[VoiceEngine] ElevenLabs TTS failed:', errMsg);
+      const authFailed = ELEVENLABS_AUTH_FAILURE.test(errMsg);
+
+      if (authFailed) {
+        await SecureStore.deleteItemAsync(ELEVENLABS_KEY);
+      }
 
       if (!this.elevenLabsFailShown) {
         this.elevenLabsFailShown = true;
         const { Alert } = require('react-native');
-        Alert.alert('ElevenLabs TTS Error', `Falling back to system voice.\n\nError: ${errMsg}`);
+        Alert.alert(
+          authFailed ? 'ElevenLabs Key Removed' : 'ElevenLabs TTS Error',
+          authFailed
+            ? 'Your ElevenLabs API key was rejected. I removed it and will use the system voice.'
+            : `Falling back to system voice.\n\nError: ${errMsg}`,
+        );
       }
 
-      this.speakWithSystem(text);
+      await this.speakWithSystem(text);
     }
   }
 
   private onSpeechDone(): void {
     if (this.continuousMode) {
       // Resume listening after response
-      this.startListening(true);
+      this.startListening(true).catch((e) => {
+        console.warn('[VoiceEngine] Failed to resume listening:', e);
+      });
     } else {
       this.setState('idle');
     }
@@ -236,17 +428,31 @@ class VoiceEngineService {
   async stopSpeaking(): Promise<void> {
     const wasContinuous = this.continuousMode;
     try {
-      Speech.stop();
+      await this.stopTts();
       await this.stopSound();
     } catch {
       // Ignore
     }
     // If in continuous mode, resume listening instead of going idle
     if (wasContinuous) {
-      this.startListening(true);
+      this.startListening(true).catch((e) => {
+        console.warn('[VoiceEngine] Failed to resume listening:', e);
+      });
     } else {
       this.setState('idle');
     }
+  }
+
+  async suspend(): Promise<void> {
+    return this.enqueueOperation(async () => {
+      this.continuousMode = false;
+      this.clearSilenceTimer();
+      this.latestTranscript = '';
+      await this.stopTts();
+      await this.stopSound();
+      await this.stopRecognition('cancel');
+      this.setState('idle');
+    });
   }
 
   private async stopSound(): Promise<void> {
@@ -261,18 +467,55 @@ class VoiceEngineService {
     }
   }
 
+  private async stopTts(): Promise<void> {
+    this.ttsCleanup?.();
+    this.ttsCleanup = null;
+    await this.stopNativeTts();
+  }
+
+  private async stopNativeTts(): Promise<void> {
+    try {
+      await Tts.stop(false);
+    } catch {
+      // Ignore
+    }
+  }
+
+  private async prepareForPlayback(): Promise<void> {
+    this.clearSilenceTimer();
+    this.latestTranscript = '';
+    await this.stopRecognition('cancel');
+    await this.stopSound();
+    await this.stopTts();
+    await Audio.setAudioModeAsync({
+      allowsRecordingIOS: false,
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: false,
+    });
+  }
+
   setThinking(): void {
     this.setState('thinking');
   }
 
   async destroy(): Promise<void> {
-    this.clearSilenceTimer();
-    await Voice.destroy();
-    Speech.stop();
-    await this.stopSound();
-    this.initialized = false;
-    this.continuousMode = false;
-    this.setState('idle');
+    return this.enqueueOperation(async () => {
+      this.clearSilenceTimer();
+      this.continuousMode = false;
+      this.latestTranscript = '';
+      try {
+        await Voice.destroy();
+      } catch {
+        // Ignore
+      }
+      Voice.removeAllListeners();
+      this.recognitionHandlersBound = false;
+      await this.stopTts();
+      await this.stopSound();
+      this.recognizing = false;
+      this.initialized = false;
+      this.setState('idle');
+    });
   }
 
   // --- Private ---
@@ -305,11 +548,7 @@ class VoiceEngineService {
       this.transcriptListeners.forEach((l) => l(finalText, true));
 
       // Stop the recognition session
-      try {
-        await Voice.stop();
-      } catch {
-        // Ignore
-      }
+      await this.enqueueOperation(() => this.stopRecognition('stop'));
     }
   }
 
@@ -335,21 +574,28 @@ class VoiceEngineService {
 
   private onSpeechError(e: SpeechErrorEvent) {
     this.clearSilenceTimer();
+    this.recognizing = false;
     const code = (e.error as Record<string, unknown>)?.code ?? e.error;
+
+    if (this.isAlreadyStartedError(e.error)) {
+      console.log('[VoiceEngine] Native recognizer was already active; continuing current session.');
+      this.recognizing = true;
+      if (this._state !== 'listening') {
+        this.setState('listening');
+      }
+      return;
+    }
+
     console.warn('[VoiceEngine] Speech error:', code, e.error);
+    this.notifyError(typeof code === 'string' ? code : 'Speech recognition error');
+    this.continuousMode = false;
 
     const elapsed = Date.now() - this.listeningStartedAt;
     if (elapsed < VoiceEngineService.MIN_LISTEN_MS) {
-      console.log('[VoiceEngine] Ignoring early speech error, restarting...');
-      setTimeout(async () => {
-        if (this._state === 'listening') {
-          try {
-            await Voice.start('en-US');
-          } catch {
-            this.setState('idle');
-          }
-        }
-      }, 100);
+      console.log('[VoiceEngine] Ignoring early speech error.');
+      if (this._state === 'listening') {
+        this.setState('idle');
+      }
       return;
     }
 
@@ -357,19 +603,6 @@ class VoiceEngineService {
       const finalText = this.latestTranscript;
       this.latestTranscript = '';
       this.transcriptListeners.forEach((l) => l(finalText, true));
-    } else if (this.continuousMode && this._state === 'listening') {
-      // No speech detected but in continuous mode — restart
-      setTimeout(async () => {
-        if (this._state === 'listening') {
-          try {
-            this.listeningStartedAt = Date.now();
-            await Voice.start('en-US');
-          } catch {
-            this.setState('idle');
-          }
-        }
-      }, 200);
-      return;
     }
 
     if (this._state === 'listening') {
@@ -379,19 +612,14 @@ class VoiceEngineService {
 
   private onSpeechEnd() {
     this.clearSilenceTimer();
+    this.recognizing = false;
     const elapsed = Date.now() - this.listeningStartedAt;
 
     if (elapsed < VoiceEngineService.MIN_LISTEN_MS && !this.latestTranscript.trim()) {
-      console.log('[VoiceEngine] Ignoring premature onSpeechEnd, restarting...');
-      setTimeout(async () => {
-        if (this._state === 'listening') {
-          try {
-            await Voice.start('en-US');
-          } catch {
-            this.setState('idle');
-          }
-        }
-      }, 100);
+      console.log('[VoiceEngine] Ignoring premature onSpeechEnd.');
+      if (this._state === 'listening') {
+        this.setState('idle');
+      }
       return;
     }
 
@@ -399,24 +627,67 @@ class VoiceEngineService {
       const finalText = this.latestTranscript;
       this.latestTranscript = '';
       this.transcriptListeners.forEach((l) => l(finalText, true));
-      // In continuous mode, don't go idle — we'll resume after thinking/speaking
-    } else if (this.continuousMode && this._state === 'listening') {
-      // No speech detected in continuous mode — restart listening
-      setTimeout(async () => {
-        if (this._state === 'listening') {
-          try {
-            this.listeningStartedAt = Date.now();
-            await Voice.start('en-US');
-          } catch {
-            this.setState('idle');
-          }
-        }
-      }, 200);
+    }
+
+    if (this._state === 'listening') {
+      this.setState('idle');
+    }
+  }
+
+  private enqueueOperation(operation: () => Promise<void>): Promise<void> {
+    const next = this.operationQueue
+      .catch(() => {})
+      .then(operation);
+
+    this.operationQueue = next.catch(() => {});
+    return next;
+  }
+
+  private isAlreadyStartedError(error: unknown): boolean {
+    const message = error instanceof Error
+      ? error.message
+      : typeof error === 'string'
+        ? error
+        : error && typeof error === 'object' && 'message' in error
+          ? String((error as { message?: unknown }).message ?? '')
+          : '';
+
+    return message.toLowerCase().includes('speech recognition already started');
+  }
+
+  private notifyError(message: string): void {
+    this.errorListeners.forEach((l) => l(message));
+  }
+
+  private async stopRecognition(method: 'cancel' | 'stop'): Promise<void> {
+    let isRecognizing = this.recognizing;
+
+    try {
+      isRecognizing = isRecognizing || Boolean(await Voice.isRecognizing());
+    } catch {
+      // Some native implementations throw when no recognizer is active.
+    }
+
+    if (!isRecognizing) {
+      this.recognizing = false;
       return;
     }
 
-    if (this._state === 'listening' && !this.continuousMode) {
-      this.setState('idle');
+    try {
+      if (method === 'stop') {
+        await Voice.stop();
+      } else {
+        await Voice.cancel();
+      }
+    } catch {
+      // Stop/cancel can race native end events; the target state is still inactive.
+    } finally {
+      try {
+        await Voice.destroy();
+      } catch {
+        // destroySpeech is the reliable iOS teardown path; ignore if already gone.
+      }
+      this.recognizing = false;
     }
   }
 }

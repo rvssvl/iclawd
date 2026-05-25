@@ -39,13 +39,13 @@
     },
     "extra": {
       "eas": {
-        "projectId": "YOUR_EAS_PROJECT_ID"
+        "projectId": "3e46a0eb-c2c5-4191-bd9e-c356c499f4e5"
       }
     },
-    "owner": "YOUR_EXPO_USERNAME",
+    "owner": "rassul.rakhimzhan",
     "runtimeVersion": "2.0.1",
     "updates": {
-      "url": "https://u.expo.dev/YOUR_EAS_PROJECT_ID"
+      "url": "https://u.expo.dev/3e46a0eb-c2c5-4191-bd9e-c356c499f4e5"
     },
     "plugins": [
       "expo-router",

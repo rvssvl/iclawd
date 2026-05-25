@@ -10,11 +10,14 @@ import {
   Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRouter, Stack } from 'expo-router';
+import { useFocusEffect, useRouter, Stack } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import * as Haptics from 'expo-haptics';
 import { colors, spacing, fontSize, borderRadius } from '@/constants/theme';
 import { useGatewayContext } from '@/contexts/GatewayContext';
+import { useVoice } from '@/hooks/useVoice';
 import { ChatBubble } from '@/components/ChatBubble';
+import { TypingIndicator } from '@/components/ui/TypingIndicator';
 import type { ChatMessage } from '@/types/gateway';
 
 export default function ChatScreen() {
@@ -24,15 +27,26 @@ export default function ChatScreen() {
     messages,
     streamingText,
     streamingId,
+    awaitingResponse,
     sendMessage,
-    stopChat,
     reconnect,
   } = useGatewayContext();
 
   const [input, setInput] = useState('');
+  const [dictating, setDictating] = useState(false);
   const flatListRef = useRef<FlatList>(null);
   const inputRef = useRef<TextInput>(null);
+  const dictationBaseRef = useRef('');
   const insets = useSafeAreaInsets();
+  const {
+    voiceState,
+    transcript,
+    startListening,
+    stopListening,
+    stopSpeaking,
+    suspend,
+    setOnFinalTranscript,
+  } = useVoice();
 
   // Auto-connect if gateway not yet connected
   useEffect(() => {
@@ -46,7 +60,7 @@ export default function ChatScreen() {
     ...messages,
     ...(streamingText
       ? [{
-          id: streamingId || 'streaming',
+          id: `streaming-${streamingId || 'pending'}`,
           role: 'assistant' as const,
           content: streamingText,
           timestamp: Date.now(),
@@ -57,10 +71,10 @@ export default function ChatScreen() {
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
-    if (displayMessages.length > 0) {
+    if (displayMessages.length > 0 || awaitingResponse) {
       setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
     }
-  }, [displayMessages.length, streamingText]);
+  }, [displayMessages.length, streamingText, awaitingResponse]);
 
   async function handleSend() {
     const text = input.trim();
@@ -69,18 +83,75 @@ export default function ChatScreen() {
     await sendMessage(text);
   }
 
+  function openVoiceMode() {
+    Haptics.selectionAsync();
+    router.push('/voice');
+  }
+
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        setDictating(false);
+        suspend();
+      };
+    }, [suspend]),
+  );
+
+  useEffect(() => {
+    setOnFinalTranscript((text) => {
+      const nextText = [dictationBaseRef.current.trim(), text.trim()]
+        .filter(Boolean)
+        .join(' ');
+      setInput(nextText);
+      setDictating(false);
+      inputRef.current?.focus();
+    });
+  }, [setOnFinalTranscript]);
+
+  useEffect(() => {
+    if (!dictating || !transcript.trim()) return;
+    const nextText = [dictationBaseRef.current.trim(), transcript.trim()]
+      .filter(Boolean)
+      .join(' ');
+    setInput(nextText);
+  }, [dictating, transcript]);
+
+  async function toggleDictation() {
+    if (connectionState !== 'connected') return;
+
+    if (voiceState === 'speaking' || voiceState === 'preparingAudio') {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      await stopSpeaking();
+      return;
+    }
+
+    if (dictating || voiceState === 'listening') {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      await stopListening();
+      setDictating(false);
+      inputRef.current?.focus();
+      return;
+    }
+
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+    dictationBaseRef.current = input;
+    setDictating(true);
+    inputRef.current?.blur();
+    await startListening(false);
+  }
+
+  async function handleStopAudio() {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    await stopSpeaking();
+  }
+
   return (
     <>
       <Stack.Screen
         options={{
           headerLeft: () => (
-            <Pressable onPress={() => router.push('/voice')} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, padding: spacing.xs }}>
-              <View style={{
-                width: 8, height: 8, borderRadius: 4,
-                backgroundColor: connectionState === 'connected' ? '#34C759'
-                  : connectionState === 'disconnected' ? '#FF3B30' : '#FFCC00',
-              }} />
-              <Ionicons name="mic" size={22} color={colors.textSecondary} />
+            <Pressable onPress={openVoiceMode} style={{ padding: spacing.xs }}>
+              <Ionicons name="headset-outline" size={22} color={colors.textSecondary} />
             </Pressable>
           ),
           headerRight: () => (
@@ -118,6 +189,11 @@ export default function ChatScreen() {
             data={displayMessages}
             keyExtractor={(item) => item.id}
             renderItem={({ item }) => <ChatBubble message={item} />}
+            ListFooterComponent={awaitingResponse && !streamingText ? (
+              <View style={styles.awaitingIndicator}>
+                <TypingIndicator />
+              </View>
+            ) : null}
             contentContainerStyle={styles.messageList}
             showsVerticalScrollIndicator={false}
           />
@@ -125,8 +201,16 @@ export default function ChatScreen() {
 
         {/* Input bar */}
         <View style={[styles.inputBar, { paddingBottom: Math.max(insets.bottom, spacing.md) }]}>
-          <Pressable style={styles.voiceButton} onPress={() => router.push('/voice')}>
-            <Ionicons name="mic" size={22} color={colors.primaryLight} />
+          <Pressable
+            style={[styles.voiceButton, dictating && styles.voiceButtonActive]}
+            onPress={toggleDictation}
+            disabled={connectionState !== 'connected' || voiceState === 'speaking' || voiceState === 'preparingAudio'}
+          >
+            <Ionicons
+              name={dictating || voiceState === 'listening' ? 'stop' : 'mic'}
+              size={22}
+              color={dictating || voiceState === 'listening' ? colors.text : colors.primaryLight}
+            />
           </Pressable>
 
           <TextInput
@@ -134,16 +218,23 @@ export default function ChatScreen() {
             style={styles.textInput}
             value={input}
             onChangeText={setInput}
-            placeholder={connectionState === 'connected' ? 'Message your agent...' : 'Not connected'}
+            placeholder={dictating
+              ? 'Listening...'
+              : connectionState === 'connected'
+                ? 'Message your agent...'
+                : 'Not connected'}
             placeholderTextColor={colors.textMuted}
             multiline
             maxLength={4000}
-            editable={connectionState === 'connected'}
+            editable={connectionState === 'connected' && !dictating}
           />
 
-          {streamingText ? (
-            <Pressable style={styles.stopButton} onPress={stopChat}>
-              <Ionicons name="stop" size={18} color={colors.error} />
+          {voiceState === 'speaking' || voiceState === 'preparingAudio' ? (
+            <Pressable style={styles.stopButton} onPress={handleStopAudio}>
+              <Ionicons name="volume-high" size={14} color={colors.error} />
+              <Text style={styles.stopButtonText}>
+                {voiceState === 'preparingAudio' ? 'Cancel audio' : 'Stop audio'}
+              </Text>
             </Pressable>
           ) : (
             <Pressable
@@ -167,6 +258,11 @@ const styles = StyleSheet.create({
   },
   messageList: {
     paddingVertical: spacing.md,
+  },
+  awaitingIndicator: {
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    alignItems: 'flex-start',
   },
   emptyState: {
     flex: 1,
@@ -203,6 +299,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  voiceButtonActive: {
+    backgroundColor: colors.voiceListening,
+  },
   textInput: {
     flex: 1,
     backgroundColor: colors.surface,
@@ -226,13 +325,20 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surfaceLight,
   },
   stopButton: {
-    width: 36,
+    paddingHorizontal: spacing.sm,
     height: 36,
     borderRadius: borderRadius.full,
     backgroundColor: colors.surface,
     alignItems: 'center',
     justifyContent: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
     borderWidth: 1,
     borderColor: colors.error,
+  },
+  stopButtonText: {
+    color: colors.error,
+    fontSize: fontSize.xs,
+    fontWeight: '600',
   },
 });

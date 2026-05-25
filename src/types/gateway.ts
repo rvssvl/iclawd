@@ -60,13 +60,16 @@ export interface ConnectParams {
 export interface HelloOkPayload {
   type: 'hello-ok';
   protocol: number;
-  policy: {
+  policy?: {
     tickIntervalMs: number;
   };
-  auth: {
+  auth?: {
     deviceToken: string;
     role: string;
     scopes: string[];
+  };
+  features?: {
+    methods?: string[];
   };
 }
 

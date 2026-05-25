@@ -24,7 +24,7 @@ export const colors = {
   info: '#339AF0',
 
   // Voice states
-  voiceListening: '#6C5CE7',
+  voiceListening: '#00D68F',
   voiceThinking: '#FFAA00',
   voiceSpeaking: '#00D68F',
   voiceIdle: '#666666',

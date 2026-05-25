@@ -6,6 +6,7 @@ import { GatewayClient } from '@/services/GatewayClient';
 import { getGatewayConfig } from '@/services/SecureStorage';
 import { voiceEngine } from '@/services/VoiceEngine';
 import type { ConnectionState, ChatMessage, GatewayConfig } from '@/types/gateway';
+import { createLocalMessageId } from '@/utils/messageIds';
 
 const KEY_AUTO_PRONOUNCE = 'iclawd_auto_pronounce';
 const KEY_NOTIFICATIONS = 'iclawd_notifications';
@@ -26,6 +27,7 @@ interface GatewayContextValue {
   messages: ChatMessage[];
   streamingText: string;
   streamingId: string | null;
+  awaitingResponse: boolean;
   sendMessage: (text: string) => Promise<void>;
   stopChat: () => Promise<void>;
   reconnect: () => Promise<void>;
@@ -35,10 +37,12 @@ const GatewayContext = createContext<GatewayContextValue | null>(null);
 
 export function GatewayProvider({ children }: { children: React.ReactNode }) {
   const clientRef = useRef<GatewayClient | null>(null);
-  const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
+  const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streamingText, setStreamingText] = useState('');
   const [streamingId, setStreamingId] = useState<string | null>(null);
+  const [awaitingResponse, setAwaitingResponse] = useState(false);
+  const stoppedResponseRef = useRef(false);
 
   // Settings refs (read from SecureStore, updated by settings screen)
   const autoPronounceRef = useRef(true);
@@ -71,6 +75,14 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
     client.onConnectionChange(setConnectionState);
 
     client.onMessage((msg) => {
+      if (stoppedResponseRef.current) {
+        setAwaitingResponse(false);
+        setStreamingText('');
+        setStreamingId(null);
+        return;
+      }
+
+      setAwaitingResponse(false);
       setStreamingText('');
       setStreamingId(null);
       setMessages((prev) => {
@@ -83,7 +95,9 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
         lastSpokenMsgIdRef.current = msg.id;
 
         if (autoPronounceRef.current && AppState.currentState === 'active') {
-          voiceEngine.speak(msg.content);
+          voiceEngine.speak(msg.content).catch((error) => {
+            console.warn('[Voice] Auto-pronounce failed:', error instanceof Error ? error.message : error);
+          });
         }
 
         if (notificationsRef.current && AppState.currentState !== 'active') {
@@ -99,8 +113,22 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
     });
 
     client.onStream((text, msgId) => {
+      if (stoppedResponseRef.current) return;
+
+      setAwaitingResponse(false);
       setStreamingId(msgId);
       setStreamingText((prev) => prev + text);
+    });
+
+    client.onActivity((active) => {
+      if (stoppedResponseRef.current) {
+        if (!active) {
+          stoppedResponseRef.current = false;
+        }
+        setAwaitingResponse(false);
+        return;
+      }
+      setAwaitingResponse(active);
     });
 
     client.connect().catch((err) => {
@@ -113,7 +141,11 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
 
     async function init() {
       const config = await getGatewayConfig();
-      if (!config || !mounted) return;
+      if (!mounted) return;
+      if (!config) {
+        setConnectionState('disconnected');
+        return;
+      }
       connectWithConfig(config);
     }
 
@@ -129,19 +161,40 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
     if (!clientRef.current) return;
 
     const userMsg: ChatMessage = {
-      id: `user-${Date.now()}`,
+      id: createLocalMessageId('user'),
       role: 'user',
       content: text,
       timestamp: Date.now(),
     };
     setMessages((prev) => [...prev, userMsg]);
     setStreamingText('');
+    setAwaitingResponse(false);
+    stoppedResponseRef.current = false;
 
-    await clientRef.current.sendChat(text);
+    try {
+      await clientRef.current.sendChat(text);
+      setAwaitingResponse(true);
+    } catch (error) {
+      setAwaitingResponse(false);
+      const errMsg = error instanceof Error ? error.message : 'Failed to send message';
+      const systemMsg: ChatMessage = {
+        id: createLocalMessageId('error'),
+        role: 'assistant',
+        content: `Message was not sent: ${errMsg}`,
+        timestamp: Date.now(),
+      };
+      setMessages((prev) => [...prev, systemMsg]);
+    }
   }, []);
 
   const stopChat = useCallback(async () => {
-    await clientRef.current?.stopChat();
+    stoppedResponseRef.current = true;
+    setAwaitingResponse(false);
+    setStreamingText('');
+    setStreamingId(null);
+    await clientRef.current?.stopChat().catch((error) => {
+      console.warn('[Gateway] Remote stop unavailable:', error instanceof Error ? error.message : error);
+    });
   }, []);
 
   const reconnect = useCallback(async () => {
@@ -156,6 +209,7 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
     messages,
     streamingText,
     streamingId,
+    awaitingResponse,
     sendMessage,
     stopChat,
     reconnect,

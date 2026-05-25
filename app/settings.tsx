@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, Pressable, Alert, ScrollView, TextInput, Platform, Switch, Linking } from 'react-native';
+import { View, Text, StyleSheet, Pressable, Alert, ScrollView, TextInput, Platform, Switch, Linking, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import * as Updates from 'expo-updates';
 import * as SecureStore from 'expo-secure-store';
 import { colors, spacing, fontSize, borderRadius } from '@/constants/theme';
 import { getGatewayConfig, deleteGatewayConfig } from '@/services/SecureStorage';
@@ -32,6 +33,7 @@ export default function SettingsScreen() {
   const [keyInput, setKeyInput] = useState('');
   const [autoPronounce, setAutoPronounce] = useState(true);
   const [notifications, setNotifications] = useState(true);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
 
   useEffect(() => {
     getGatewayConfig().then(setConfig);
@@ -97,6 +99,47 @@ export default function SettingsScreen() {
     setNotifications(value);
     await SecureStore.setItemAsync(KEY_NOTIFICATIONS, String(value));
   }
+
+  async function handleCheckForUpdates() {
+    if (__DEV__) {
+      Alert.alert('Updates unavailable', 'OTA updates are disabled in development builds.');
+      return;
+    }
+
+    setCheckingUpdate(true);
+    try {
+      const update = await Updates.checkForUpdateAsync();
+      if (!update.isAvailable) {
+        Alert.alert('Up to date', 'You are already running the latest available update.');
+        return;
+      }
+
+      await Updates.fetchUpdateAsync();
+      Alert.alert('Update ready', 'Restart the app now to use the latest update.', [
+        { text: 'Later', style: 'cancel' },
+        {
+          text: 'Restart Now',
+          onPress: () => {
+            Updates.reloadAsync().catch(() => {});
+          },
+        },
+      ]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not check for updates.';
+      Alert.alert('Update check failed', message);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  }
+
+  const bundleLabel = Updates.updateId
+    ? Updates.updateId.slice(0, 8)
+    : Updates.isEmbeddedLaunch
+      ? 'Embedded'
+      : 'Unavailable';
+  const bundleDate = Updates.createdAt
+    ? Updates.createdAt.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : null;
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
@@ -225,6 +268,22 @@ export default function SettingsScreen() {
           <Text style={styles.rowLabel}>Version</Text>
           <Text style={styles.rowValue}>2.0.1</Text>
         </View>
+        <View style={styles.divider} />
+        <View style={styles.row}>
+          <Text style={styles.rowLabel}>Bundle</Text>
+          <Text style={styles.rowValue} numberOfLines={1}>
+            {bundleDate ? `${bundleLabel} · ${bundleDate}` : bundleLabel}
+          </Text>
+        </View>
+        <View style={styles.divider} />
+        <Pressable style={styles.row} onPress={handleCheckForUpdates} disabled={checkingUpdate}>
+          <Text style={styles.rowLabel}>Check for Updates</Text>
+          {checkingUpdate ? (
+            <ActivityIndicator size="small" color={colors.primaryLight} />
+          ) : (
+            <Ionicons name="cloud-download-outline" size={18} color={colors.primary} />
+          )}
+        </Pressable>
         <View style={styles.divider} />
         <View style={styles.row}>
           <Text style={styles.rowLabel}>License</Text>

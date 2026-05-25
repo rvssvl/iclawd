@@ -1,15 +1,19 @@
 import React, { useEffect, useRef, useCallback, useMemo } from 'react';
 import { View, Text, StyleSheet, Pressable, FlatList } from 'react-native';
 import Animated, { FadeIn } from 'react-native-reanimated';
-import { useRouter, Stack } from 'expo-router';
+import { useFocusEffect, useRouter, Stack } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { colors, spacing, fontSize } from '@/constants/theme';
 import { useGatewayContext } from '@/contexts/GatewayContext';
-import { useVoice } from '@/hooks/useVoice';
+import { useVoiceConversation } from '@/hooks/useVoiceConversation';
 import { VoiceOrb } from '@/components/VoiceOrb';
 import { ChatBubble } from '@/components/ChatBubble';
 import { TypingIndicator } from '@/components/ui/TypingIndicator';
+import type { ChatMessage } from '@/types/gateway';
+
+const ORB_DOCK_HEIGHT = 238;
+const ORB_FADE_STEPS = [0.02, 0.08, 0.18, 0.34, 0.56, 0.78, 0.94];
 
 export default function VoiceChatScreen() {
   const router = useRouter();
@@ -17,30 +21,44 @@ export default function VoiceChatScreen() {
     connectionState,
     messages,
     streamingText,
+    streamingId,
+    awaitingResponse,
     sendMessage,
     reconnect,
   } = useGatewayContext();
-
-  const {
-    voiceState,
-    transcript,
-    startListening,
-    stopListening,
-    stopSpeaking,
-    setThinking,
-    setOnFinalTranscript,
-  } = useVoice();
 
   const flatListRef = useRef<FlatList>(null);
   const lastSpokenIdRef = useRef<string | null>(null);
   const isConnected = connectionState === 'connected';
   const isConnecting = connectionState === 'connecting' || connectionState === 'reconnecting';
+  const latestAssistantId = useMemo(() => {
+    const lastAssistant = [...messages].reverse().find((message) => message.role === 'assistant');
+    return lastAssistant?.id || null;
+  }, [messages]);
 
-  const statusColor = useMemo(() =>
-    connectionState === 'connected' ? '#34C759'
-      : connectionState === 'disconnected' ? '#FF3B30'
-      : '#FFCC00',
-    [connectionState],
+  const {
+    conversationState,
+    orbState,
+    transcript,
+    statusLabel,
+    toggleMic,
+    pause,
+    isBusy,
+  } = useVoiceConversation({
+    connectionState,
+    awaitingResponse,
+    streamingText,
+    latestAssistantId,
+    sendMessage,
+    reconnect,
+  });
+
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        pause();
+      };
+    }, [pause]),
   );
 
   // Auto-connect if gateway not yet connected
@@ -49,21 +67,6 @@ export default function VoiceChatScreen() {
       reconnect();
     }
   }, []);
-
-  // Auto-start continuous listening when connected
-  useEffect(() => {
-    if (isConnected && voiceState === 'idle') {
-      startListening(true);
-    }
-  }, [isConnected]);
-
-  // Wire voice → gateway
-  useEffect(() => {
-    setOnFinalTranscript(async (text) => {
-      setThinking();
-      await sendMessage(text);
-    });
-  }, [setOnFinalTranscript, setThinking, sendMessage]);
 
   // Haptic on new assistant message
   useEffect(() => {
@@ -75,32 +78,32 @@ export default function VoiceChatScreen() {
     }
   }, [messages]);
 
-  const displayMessages = messages.slice(-10);
+  const displayMessages: ChatMessage[] = [
+    ...messages,
+    ...(streamingText
+      ? [{
+          id: `voice-streaming-${streamingId || 'pending'}`,
+          role: 'assistant' as const,
+          content: streamingText,
+          timestamp: Date.now(),
+          streaming: true,
+        }]
+      : []),
+  ].slice(-10);
 
   // Auto-scroll
   useEffect(() => {
-    if (displayMessages.length > 0) {
+    if (displayMessages.length > 0 || awaitingResponse) {
       setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
     }
-  }, [displayMessages.length]);
+  }, [awaitingResponse, displayMessages.length, streamingText]);
 
-  // Tap: toggle listening on/off, or stop speaking
-  const handleTap = useCallback(() => {
-    if (!isConnected) return;
+  const handleChatPress = useCallback(() => {
+    Haptics.selectionAsync();
+    router.push('/chat');
+  }, [router]);
 
-    if (voiceState === 'speaking') {
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      stopSpeaking();
-    } else if (voiceState === 'idle') {
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-      startListening(true);
-    } else if (voiceState === 'listening') {
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      stopListening();
-    }
-  }, [voiceState, isConnected, stopSpeaking, startListening, stopListening]);
-
-  const hasMessages = displayMessages.length > 0 || !!streamingText;
+  const hasMessages = displayMessages.length > 0 || awaitingResponse;
 
   return (
     <>
@@ -108,12 +111,11 @@ export default function VoiceChatScreen() {
         options={{
           headerTitle: () => (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: statusColor }} />
               <Text style={{ color: colors.text, fontSize: 17, fontWeight: '600' }}>Voice</Text>
             </View>
           ),
           headerLeft: () => (
-            <Pressable onPress={() => router.push('/chat')} style={{ padding: spacing.xs }}>
+            <Pressable onPress={handleChatPress} style={{ padding: spacing.xs }}>
               <Ionicons name="chatbubble-outline" size={22} color={colors.textSecondary} />
             </Pressable>
           ),
@@ -133,33 +135,45 @@ export default function VoiceChatScreen() {
             data={displayMessages}
             keyExtractor={(item) => item.id}
             renderItem={({ item }) => <ChatBubble message={item} />}
+            ListFooterComponent={awaitingResponse && !streamingText ? <TypingIndicator /> : null}
             style={styles.messageList}
             contentContainerStyle={styles.messageContent}
             showsVerticalScrollIndicator={false}
           />
         )}
 
-        {/* Streaming text area */}
-        {streamingText ? (
-          <Animated.View entering={FadeIn.duration(200)} style={styles.streamingArea}>
-            <Text style={styles.streamingText}>{streamingText}</Text>
-          </Animated.View>
-        ) : voiceState === 'thinking' ? (
-          <Animated.View entering={FadeIn.duration(200)} style={styles.streamingArea}>
-            <TypingIndicator />
-          </Animated.View>
-        ) : null}
-
         {/* Voice orb */}
-        <View style={[styles.orbSection, !hasMessages && styles.orbCentered]}>
+        <Animated.View entering={FadeIn.duration(200)} style={hasMessages ? styles.orbDock : styles.orbCentered}>
+          {hasMessages && (
+            <View pointerEvents="none" style={styles.dockBackdrop}>
+              <View style={styles.dockFade}>
+                {ORB_FADE_STEPS.map((opacity, index) => (
+                  <View
+                    key={opacity}
+                    style={[
+                      styles.fadeStep,
+                      {
+                        opacity,
+                        top: `${(index / ORB_FADE_STEPS.length) * 100}%`,
+                        height: `${100 / ORB_FADE_STEPS.length + 1}%`,
+                      },
+                    ]}
+                  />
+                ))}
+              </View>
+              <View style={styles.dockSolid} />
+            </View>
+          )}
           <VoiceOrb
-            state={voiceState}
+            state={orbState}
             transcript={transcript}
-            onTap={handleTap}
+            onTap={toggleMic}
             disabled={!isConnected}
             connecting={isConnecting}
+            busy={isBusy}
+            statusLabel={statusLabel}
           />
-        </View>
+        </Animated.View>
       </View>
     </>
   );
@@ -176,23 +190,47 @@ const styles = StyleSheet.create({
   messageContent: {
     paddingVertical: spacing.lg,
     paddingHorizontal: spacing.xs,
+    paddingBottom: ORB_DOCK_HEIGHT + spacing.lg,
   },
-  streamingArea: {
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm,
-  },
-  streamingText: {
-    color: colors.textSecondary,
-    fontSize: fontSize.md,
-    lineHeight: 22,
-  },
-  orbSection: {
-    paddingVertical: spacing.xxl,
-    paddingBottom: spacing.xxl + 20,
+  orbDock: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: ORB_DOCK_HEIGHT,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.xxl,
     alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dockBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  dockFade: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    height: 84,
+  },
+  fadeStep: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    backgroundColor: colors.background,
+  },
+  dockSolid: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 70,
+    bottom: 0,
+    backgroundColor: colors.background,
   },
   orbCentered: {
     flex: 1,
+    paddingBottom: spacing.xxl + 20,
+    alignItems: 'center',
     justifyContent: 'center',
   },
 });

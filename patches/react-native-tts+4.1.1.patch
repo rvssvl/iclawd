@@ -1,0 +1,41 @@
+diff --git a/node_modules/react-native-tts/ios/TextToSpeech/TextToSpeech.m b/node_modules/react-native-tts/ios/TextToSpeech/TextToSpeech.m
+index 1e769cc..501f730 100644
+--- a/node_modules/react-native-tts/ios/TextToSpeech/TextToSpeech.m
++++ b/node_modules/react-native-tts/ios/TextToSpeech/TextToSpeech.m
+@@ -94,11 +94,11 @@ + (BOOL)requiresMainQueueSetup
+     resolve([NSNumber numberWithUnsignedLong:utterance.hash]);
+ }
+ 
+-RCT_EXPORT_METHOD(stop:(BOOL *)onWordBoundary resolve:(RCTPromiseResolveBlock)resolve reject:(__unused RCTPromiseRejectBlock)reject)
++RCT_EXPORT_METHOD(stop:(BOOL)onWordBoundary resolve:(RCTPromiseResolveBlock)resolve reject:(__unused RCTPromiseRejectBlock)reject)
+ {
+     AVSpeechBoundary boundary;
+ 
+-    if(onWordBoundary != NULL && onWordBoundary) {
++    if(onWordBoundary) {
+         boundary = AVSpeechBoundaryWord;
+     } else {
+         boundary = AVSpeechBoundaryImmediate;
+@@ -109,11 +109,11 @@ + (BOOL)requiresMainQueueSetup
+     resolve([NSNumber numberWithBool:stopped]);
+ }
+ 
+-RCT_EXPORT_METHOD(pause:(BOOL *)onWordBoundary resolve:(RCTPromiseResolveBlock)resolve reject:(__unused RCTPromiseRejectBlock)reject)
++RCT_EXPORT_METHOD(pause:(BOOL)onWordBoundary resolve:(RCTPromiseResolveBlock)resolve reject:(__unused RCTPromiseRejectBlock)reject)
+ {
+     AVSpeechBoundary boundary;
+ 
+-    if(onWordBoundary != NULL && onWordBoundary) {
++    if(onWordBoundary) {
+         boundary = AVSpeechBoundaryWord;
+     } else {
+         boundary = AVSpeechBoundaryImmediate;
+@@ -132,7 +132,7 @@ + (BOOL)requiresMainQueueSetup
+ }
+ 
+ 
+-RCT_EXPORT_METHOD(setDucking:(BOOL *)ducking
++RCT_EXPORT_METHOD(setDucking:(BOOL)ducking
+                   resolve:(RCTPromiseResolveBlock)resolve
+                   reject:(__unused RCTPromiseRejectBlock)reject)
+ {
