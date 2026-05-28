@@ -16,15 +16,12 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.rakhimzhan.ai.third.voice",
-      "buildNumber": "10",
+      "buildNumber": "11",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "iClawd needs microphone access for voice conversations with your AI agent.",
         "NSSpeechRecognitionUsageDescription": "iClawd uses speech recognition to convert your voice to text.",
         "NSCameraUsageDescription": "iClawd uses the camera to scan QR codes for gateway connection.",
-        "NSPhotoLibraryUsageDescription": "iClawd may access your photo library to share images with your AI agent.",
-        "UIBackgroundModes": [
-          "audio"
-        ]
+        "NSPhotoLibraryUsageDescription": "iClawd may access your photo library to share images with your AI agent."
       }
     },
     "android": {
