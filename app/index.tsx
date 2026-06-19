@@ -4,6 +4,7 @@ import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, fontSize, borderRadius } from '@/constants/theme';
 import { getGatewayConfig } from '@/services/SecureStorage';
+import { track } from '@/services/AnalyticsService';
 
 export default function OnboardingScreen() {
   const router = useRouter();
@@ -25,6 +26,7 @@ export default function OnboardingScreen() {
       // No config — show onboarding
     }
     setChecking(false);
+    track('onboarding_viewed', { screen: 'onboarding' });
   }
 
   if (checking) {
@@ -42,9 +44,9 @@ export default function OnboardingScreen() {
         <View style={styles.logoContainer}>
           <Text style={styles.logoEmoji}>🦀</Text>
         </View>
-        <Text style={styles.title}>iClawd</Text>
+        <Text style={styles.title}>ClawVoice</Text>
         <Text style={styles.subtitle}>
-          Voice-first companion for your{'\n'}OpenClaw AI agent
+          formerly Iclawd{'\n'}Voice-first for OpenClaw
         </Text>
       </View>
 
@@ -52,7 +54,10 @@ export default function OnboardingScreen() {
       <View style={styles.actions}>
         <Pressable
           style={styles.primaryButton}
-          onPress={() => router.push('/connect')}
+          onPress={() => {
+            track('connect_selected', { screen: 'onboarding' });
+            router.push('/connect');
+          }}
         >
           <Ionicons name="link" size={24} color={colors.text} />
           <View style={styles.buttonTextContainer}>
@@ -64,7 +69,10 @@ export default function OnboardingScreen() {
 
         <Pressable
           style={styles.secondaryButton}
-          onPress={() => router.push('/setup-guide')}
+          onPress={() => {
+            track('setup_guide_selected', { screen: 'onboarding' });
+            router.push('/setup-guide');
+          }}
         >
           <Ionicons name="rocket" size={24} color={colors.primaryLight} />
           <View style={styles.buttonTextContainer}>

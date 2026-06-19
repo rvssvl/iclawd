@@ -1,6 +1,6 @@
 {
-  "name": "iclawd",
-  "version": "2.0.2",
+  "name": "clawvoice",
+  "version": "3.0.0",
   "main": "expo-router/entry",
   "scripts": {
     "start": "expo start",
@@ -13,6 +13,8 @@
   "dependencies": {
     "@config-plugins/react-native-siri-shortcut": "^11.0.0",
     "@expo/vector-icons": "^15.0.3",
+    "@react-native-firebase/analytics": "^24.0.0",
+    "@react-native-firebase/app": "^24.0.0",
     "@react-native-voice/voice": "^3.2.4",
     "expo": "~54.0.33",
     "expo-av": "~16.0.8",

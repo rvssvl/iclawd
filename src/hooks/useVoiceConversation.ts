@@ -3,11 +3,14 @@ import { AppState, type AppStateStatus } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { useVoice } from '@/hooks/useVoice';
 import type { ConnectionState } from '@/types/gateway';
+import { categorizeError, track, trackOnce } from '@/services/AnalyticsService';
 import {
   getVoiceOrbState,
   initialVoiceConversationState,
   voiceConversationReducer,
 } from '@/hooks/voiceConversationState';
+
+const QUICK_MANUAL_STOP_MS = 700;
 
 interface Params {
   connectionState: ConnectionState;
@@ -43,6 +46,8 @@ export function useVoiceConversation({
   const latestAssistantIdRef = useRef(latestAssistantId);
   const inFlightUtteranceRef = useRef<string | null>(null);
   const lastSentUtteranceRef = useRef<{ text: string; at: number } | null>(null);
+  const listeningStartedAtRef = useRef<number | null>(null);
+  const finalTranscriptReceivedRef = useRef(false);
   stateRef.current = state;
 
   const pulse = useCallback((style: Haptics.ImpactFeedbackStyle) => {
@@ -53,19 +58,33 @@ export function useVoiceConversation({
   }, []);
 
   useEffect(() => {
+    dispatch({ type: AppState.currentState === 'active' ? 'FOREGROUND' : 'BACKGROUND' });
+  }, []);
+
+  useEffect(() => {
     dispatch({ type: 'TRANSCRIPT_PARTIAL', text: transcript });
   }, [transcript]);
 
   useEffect(() => {
     if (lastError) {
-      dispatch({ type: 'AUDIO_ERROR', error: lastError });
+      const errorCategory = categorizeError(lastError);
+      track(errorCategory === 'stt_no_match' ? 'voice_no_speech' : 'voice_stt_failed', {
+        provider: inputProvider,
+        error_category: errorCategory,
+      });
+      dispatch(
+        errorCategory === 'stt_no_match'
+          ? { type: 'AUDIO_NOTICE', message: lastError }
+          : { type: 'AUDIO_ERROR', error: lastError },
+      );
     }
-  }, [lastError]);
+  }, [inputProvider, lastError]);
 
   useEffect(() => {
     setOnFinalTranscript(async (text) => {
       const utterance = text.trim();
       if (!utterance) return;
+      finalTranscriptReceivedRef.current = true;
 
       const normalized = utterance.toLocaleLowerCase();
       const now = Date.now();
@@ -115,8 +134,13 @@ export function useVoiceConversation({
 
   useEffect(() => {
     if (voiceState === 'listening') {
+      if (!listeningStartedAtRef.current) {
+        listeningStartedAtRef.current = Date.now();
+      }
       dispatch({ type: 'MIC_READY' });
       dispatch({ type: 'TRANSCRIPT_PARTIAL', text: transcript });
+    } else {
+      listeningStartedAtRef.current = null;
     }
     if (voiceState === 'speaking') {
       dispatch({ type: 'TTS_STARTED' });
@@ -147,14 +171,15 @@ export function useVoiceConversation({
     const shouldListen =
       connectionState === 'connected'
       && state.foreground
+      && AppState.currentState === 'active'
       && state.status === 'starting'
       && voiceState === 'idle'
       && !awaitingResponse
       && !streamingText;
 
     if (shouldListen) {
-      startListening(true).catch(() => {
-        dispatch({ type: 'AUDIO_ERROR', error: 'Could not start microphone' });
+      startListening(true).catch((error) => {
+        dispatch({ type: 'AUDIO_ERROR', error: formatAudioStartError(error) });
       });
     }
   }, [awaitingResponse, connectionState, startListening, state.foreground, state.status, streamingText, voiceState]);
@@ -171,7 +196,7 @@ export function useVoiceConversation({
       return;
     }
 
-    const timer = setTimeout(() => dispatch({ type: 'START_SESSION' }), 700);
+    const timer = setTimeout(() => dispatch({ type: 'START_SESSION' }), 1200);
     return () => clearTimeout(timer);
   }, [awaitingResponse, connectionState, state.foreground, state.status, streamingText, voiceState]);
 
@@ -182,6 +207,15 @@ export function useVoiceConversation({
   }, [connectionState, state.foreground, state.sessionEnabled, state.status]);
 
   const toggleMic = useCallback(async () => {
+    if (AppState.currentState !== 'active') {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      dispatch({
+        type: 'AUDIO_ERROR',
+        error: 'Open ClawVoice in the foreground to use the microphone.',
+      });
+      return;
+    }
+
     if (connectionState !== 'connected') {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
       reconnect();
@@ -190,8 +224,9 @@ export function useVoiceConversation({
 
     if (state.status === 'speaking' || voiceState === 'speaking' || voiceState === 'preparingAudio') {
       pulse(Haptics.ImpactFeedbackStyle.Medium);
+      track('voice_stopped_audio', { provider: inputProvider });
       await stopSpeaking();
-      dispatch({ type: 'TTS_DONE' });
+      dispatch({ type: 'PAUSE_MIC' });
       return;
     }
 
@@ -204,6 +239,13 @@ export function useVoiceConversation({
 
     if (state.status === 'listening' || voiceState === 'listening') {
       pulse(Haptics.ImpactFeedbackStyle.Medium);
+      const elapsed = listeningStartedAtRef.current ? Date.now() - listeningStartedAtRef.current : Infinity;
+      if (elapsed < QUICK_MANUAL_STOP_MS) {
+        dispatch({ type: 'PAUSE_MIC' });
+        await suspend();
+        return;
+      }
+
       const pendingTranscript = (state.transcript || transcript).trim();
       if (pendingTranscript) {
         dispatch({ type: 'SEND_UTTERANCE' });
@@ -211,17 +253,17 @@ export function useVoiceConversation({
         return;
       }
 
-      if (inputProvider === 'elevenlabs') {
-        await stopListening();
-        return;
+      finalTranscriptReceivedRef.current = false;
+      await stopListening();
+      if (!finalTranscriptReceivedRef.current) {
+        dispatch({ type: 'PAUSE_MIC' });
       }
-
-      dispatch({ type: 'PAUSE_MIC' });
-      await suspend();
       return;
     }
 
     pulse(Haptics.ImpactFeedbackStyle.Heavy);
+    track('voice_started', { provider: inputProvider });
+    trackOnce('first_voice_started', { provider: inputProvider });
     dispatch({ type: 'RESUME_MIC' });
   }, [connectionState, inputProvider, pulse, reconnect, state.status, state.transcript, stopListening, stopSpeaking, suspend, transcript, voiceState]);
 
@@ -249,7 +291,7 @@ export function useVoiceConversation({
 
     switch (state.status) {
       case 'paused':
-        return connectionState === 'connected' ? 'Paused. Tap to resume.' : 'Tap to reconnect';
+        return state.error || (connectionState === 'connected' ? 'Tap to listen.' : 'Tap to reconnect');
       case 'starting':
         return 'Starting microphone...';
       case 'listening':
@@ -286,4 +328,12 @@ export function useVoiceConversation({
     pause,
     isBusy: state.status === 'finalizing',
   };
+}
+
+function formatAudioStartError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.toLowerCase().includes('background')) {
+    return 'Open ClawVoice in the foreground to use the microphone.';
+  }
+  return 'Could not start microphone';
 }

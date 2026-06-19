@@ -33,6 +33,8 @@ yarn-error.*
 # local env files
 .env*.local
 .env
+GoogleService-Info.plist
+google-services.json
 
 # EAS credentials (contains Apple ID, team ID)
 eas.json

@@ -17,6 +17,8 @@ export interface ResponseFrame {
   error?: {
     code: string;
     message: string;
+    retryable?: boolean;
+    retryAfterMs?: number;
   };
 }
 
@@ -24,6 +26,7 @@ export interface EventFrame {
   type: 'event';
   event: string;
   data?: Record<string, unknown>;
+  payload?: Record<string, unknown>;
 }
 
 export type Frame = RequestFrame | ResponseFrame | EventFrame;
@@ -45,6 +48,7 @@ export interface ConnectParams {
   permissions: Record<string, boolean>;
   auth: {
     token: string;
+    deviceToken?: string;
   };
   locale: string;
   userAgent: string;
@@ -70,6 +74,7 @@ export interface HelloOkPayload {
   };
   features?: {
     methods?: string[];
+    events?: string[];
   };
 }
 

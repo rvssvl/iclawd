@@ -34,9 +34,12 @@ function getErrorMessage(body: unknown, fallback: string): string {
   return fallback;
 }
 
-export async function transcribeWithElevenLabs(audioUri: string, apiKey: string): Promise<string> {
+export async function transcribeWithElevenLabs(audioUri: string, apiKey: string, languageCode?: string): Promise<string> {
   const body = new FormData();
   body.append('model_id', ELEVENLABS_STT_MODEL);
+  if (languageCode) {
+    body.append('language_code', languageCode);
+  }
   body.append('file', {
     uri: audioUri,
     name: 'speech.m4a',

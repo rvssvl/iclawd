@@ -33,6 +33,7 @@ export type VoiceConversationAction =
   | { type: 'TTS_DONE' }
   | { type: 'BACKGROUND' }
   | { type: 'FOREGROUND' }
+  | { type: 'AUDIO_NOTICE'; message: string }
   | { type: 'AUDIO_ERROR'; error: string };
 
 export const initialVoiceConversationState: VoiceConversationState = {
@@ -70,11 +71,13 @@ export function voiceConversationReducer(
     case 'TTS_STARTED':
       return { ...state, status: 'speaking', error: null };
     case 'TTS_DONE':
-      return { ...state, status: state.foreground && state.sessionEnabled ? 'starting' : 'paused', error: null };
+      return { ...state, status: state.foreground && state.sessionEnabled ? 'recovering' : 'paused', error: null };
     case 'BACKGROUND':
       return { ...state, status: 'paused', foreground: false, sessionEnabled: false, transcript: '' };
     case 'FOREGROUND':
       return { ...state, foreground: true };
+    case 'AUDIO_NOTICE':
+      return { ...state, status: 'paused', sessionEnabled: false, error: action.message, transcript: '' };
     case 'AUDIO_ERROR':
       return { ...state, status: 'error', sessionEnabled: false, error: action.error, transcript: '' };
     default:

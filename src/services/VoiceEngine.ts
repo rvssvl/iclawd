@@ -2,10 +2,10 @@ import Voice, {
   SpeechResultsEvent,
   SpeechErrorEvent,
 } from '@react-native-voice/voice';
-import { Audio } from 'expo-av';
+import { Audio, InterruptionModeIOS } from 'expo-av';
 import type { RecordingStatus } from 'expo-av/build/Audio/Recording.types';
 import * as FileSystem from 'expo-file-system/legacy';
-import * as SecureStore from 'expo-secure-store';
+import * as SecureStore from '@/services/SafeSecureStore';
 import Tts, { TtsEvent } from 'react-native-tts';
 import {
   ELEVENLABS_KEY,
@@ -14,6 +14,8 @@ import {
   isElevenLabsSttEnabled,
 } from '@/services/ElevenLabsConfig';
 import { ElevenLabsSpeechError, transcribeWithElevenLabs } from '@/services/ElevenLabsSpeechService';
+import { getVoiceLanguage } from '@/services/VoiceLanguageConfig';
+import { categorizeError, track } from '@/services/AnalyticsService';
 
 export type VoiceState = 'idle' | 'listening' | 'thinking' | 'preparingAudio' | 'speaking';
 export type VoiceInputProvider = 'system' | 'elevenlabs';
@@ -29,6 +31,11 @@ interface SuspendOptions {
 const ELEVENLABS_MODEL = 'eleven_flash_v2_5';
 const ELEVENLABS_AUTH_FAILURE = /HTTP\s+(401|403)\b/i;
 const ELEVENLABS_TTS_TIMEOUT_MS = 30000;
+const QUICK_MANUAL_STOP_MS = 700;
+const NO_SPEECH_TIMEOUT_MS = 6000;
+const STUCK_LISTENING_GUARD_MS = 30000;
+const ACTIVE_SPEECH_GRACE_MS = 2500;
+const POST_TTS_COOLDOWN_MS = 1000;
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -54,6 +61,44 @@ async function settleTtsOption(label: string, option: () => Promise<unknown>): P
   }
 }
 
+function formatSpeechError(code: unknown): string {
+  const normalizedCode = typeof code === 'string' ? code.toLowerCase() : '';
+
+  if (normalizedCode === 'recognition_fail') {
+    return 'Speech recognition did not hear clear speech. If you are using the simulator, test with a real iPhone microphone.';
+  }
+
+  if (normalizedCode.includes('not_authorized') || normalizedCode.includes('permission')) {
+    return 'Microphone or speech recognition permission is not enabled.';
+  }
+
+  if (normalizedCode.includes('no_match')) {
+    return 'I could not understand that. Try speaking again.';
+  }
+
+  return 'Speech recognition error. Try again from the physical iPhone microphone.';
+}
+
+function formatAudioError(error: unknown): string {
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === 'string'
+      ? error
+      : error && typeof error === 'object' && 'message' in error
+        ? String((error as { message?: unknown }).message ?? '')
+        : '';
+  const normalized = message.toLowerCase();
+
+  if (normalized.includes('background')) {
+    return 'Open ClawVoice in the foreground to use the microphone.';
+  }
+  if (normalized.includes('permission') || normalized.includes('not authorized')) {
+    return 'Microphone permission is required.';
+  }
+
+  return message || 'Could not start microphone';
+}
+
 class VoiceEngineService {
   private stateListeners = new Set<StateListener>();
   private inputProviderListeners = new Set<InputProviderListener>();
@@ -64,10 +109,17 @@ class VoiceEngineService {
   private initialized = false;
   private latestTranscript = '';
   private listeningStartedAt = 0;
+  private speechStarted = false;
+  private lastSpeechActivityAt = 0;
   private static MIN_LISTEN_MS = 800;
   private sound: Audio.Sound | null = null;
   private continuousMode = false;
   private silenceTimer: ReturnType<typeof setTimeout> | null = null;
+  private noSpeechTimer: ReturnType<typeof setTimeout> | null = null;
+  private stuckListeningTimer: ReturnType<typeof setTimeout> | null = null;
+  private postTtsTimer: ReturnType<typeof setTimeout> | null = null;
+  private listeningGeneration = 0;
+  private playbackGeneration = 0;
   private operationQueue: Promise<void> = Promise.resolve();
   private recognizing = false;
   private recognitionHandlersBound = false;
@@ -139,6 +191,10 @@ class VoiceEngineService {
 
   async startListening(continuous = false): Promise<void> {
     return this.enqueueOperation(async () => {
+      if (this._state === 'speaking' || this._state === 'preparingAudio') {
+        return;
+      }
+
       await this.useRecordingAudioMode();
       this.continuousMode = continuous;
 
@@ -146,7 +202,7 @@ class VoiceEngineService {
         return;
       }
 
-      this.clearSilenceTimer();
+      this.resetListeningSession();
       await this.stopSound();
       await this.stopTts();
       this.latestTranscript = '';
@@ -161,12 +217,13 @@ class VoiceEngineService {
       await this.initRecognition();
       this.setInputProvider('system');
 
-      this.listeningStartedAt = Date.now();
+      this.markListeningStarted();
       this.setState('listening');
 
       try {
         this.recognizing = true;
-        await Voice.start('en-US');
+        const language = await getVoiceLanguage();
+        await Voice.start(language.locale);
       } catch (e) {
         if (this.isAlreadyStartedError(e)) {
           this.recognizing = true;
@@ -174,8 +231,9 @@ class VoiceEngineService {
           return;
         }
         this.recognizing = false;
+        this.clearListeningTimers();
         console.warn('[VoiceEngine] Failed to start listening:', e);
-        this.notifyError(e instanceof Error ? e.message : 'Failed to start listening');
+        this.notifyError(formatAudioError(e));
         this.setState('idle');
       }
     });
@@ -184,15 +242,26 @@ class VoiceEngineService {
   async stopListening(): Promise<void> {
     return this.enqueueOperation(async () => {
       this.continuousMode = false;
-      this.clearSilenceTimer();
+      this.clearListeningTimers();
+      const elapsed = Date.now() - this.listeningStartedAt;
+
+      if (elapsed < QUICK_MANUAL_STOP_MS) {
+        this.latestTranscript = '';
+        await this.finishElevenLabsRecording('cancel');
+        await this.stopRecognition('cancel');
+        if (this._state === 'listening') {
+          this.setState('idle');
+        }
+        return;
+      }
+
       if (this.recordingProvider === 'elevenlabs' || this.recording) {
         await this.finishElevenLabsRecording('manual');
         return;
       }
       if (this.latestTranscript.trim()) {
-        const finalText = this.latestTranscript;
-        this.latestTranscript = '';
-        this.transcriptListeners.forEach((l) => l(finalText, true));
+        await this.finalizeCurrentTranscript('manual');
+        return;
       }
       this.latestTranscript = '';
       await this.stopRecognition('stop');
@@ -223,6 +292,7 @@ class VoiceEngineService {
       initStatus = Tts.getInitStatus();
     } catch (error) {
       console.warn('[VoiceEngine] Native TTS init threw:', error);
+      track('voice_tts_failed', { provider: 'system', error_category: categorizeError(error) });
       this.onSpeechDone();
       return;
     }
@@ -231,6 +301,7 @@ class VoiceEngineService {
       () => true,
       (error) => {
         console.warn('[VoiceEngine] Native TTS init failed:', error);
+        track('voice_tts_failed', { provider: 'system', error_category: categorizeError(error) });
         return false;
       },
     );
@@ -241,7 +312,7 @@ class VoiceEngineService {
 
     await Promise.all([
       settleTtsOption('ignoreSilentSwitch', () => Tts.setIgnoreSilentSwitch('ignore')),
-      settleTtsOption('language', () => Tts.setDefaultLanguage('en-US')),
+      settleTtsOption('language', async () => Tts.setDefaultLanguage((await getVoiceLanguage()).locale)),
       settleTtsOption('rate', () => Tts.setDefaultRate(0.48)),
       settleTtsOption('pitch', () => Tts.setDefaultPitch(1.0)),
     ]);
@@ -274,7 +345,9 @@ class VoiceEngineService {
       if (completed) return;
       completed = true;
       cleanup();
-      this.onSpeechDone();
+      this.onSpeechDone().catch((error) => {
+        console.warn('[VoiceEngine] Failed to finish native TTS:', error);
+      });
     };
 
     const handleStart = (event: TtsEvent) => {
@@ -303,6 +376,7 @@ class VoiceEngineService {
       this.ttsCleanup = cleanup;
     } catch (error) {
       console.warn('[VoiceEngine] Failed to subscribe to native TTS events:', error);
+      track('voice_tts_failed', { provider: 'system', error_category: categorizeError(error) });
       finish();
       return;
     }
@@ -311,6 +385,7 @@ class VoiceEngineService {
       utteranceId = Tts.speak(text);
     } catch (error) {
       console.warn('[VoiceEngine] Failed to queue native TTS:', error);
+      track('voice_tts_failed', { provider: 'system', error_category: categorizeError(error) });
       finish();
     }
   }
@@ -340,6 +415,7 @@ class VoiceEngineService {
     try {
       console.log('[VoiceEngine] ElevenLabs: starting request...');
       const settings = await getElevenLabsTtsSettings();
+      const language = await getVoiceLanguage();
 
       const requestAudio = () => new Promise<ArrayBuffer>((resolve, reject) => {
           const xhr = new XMLHttpRequest();
@@ -374,6 +450,7 @@ class VoiceEngineService {
           xhr.send(JSON.stringify({
             text,
             model_id: ELEVENLABS_MODEL,
+            language_code: language.languageCode,
             voice_settings: {
               stability: settings.stability,
               similarity_boost: settings.similarityBoost,
@@ -421,17 +498,21 @@ class VoiceEngineService {
         { shouldPlay: true },
       );
       this.sound = sound;
+      const playbackGeneration = this.playbackGeneration;
       console.log('[VoiceEngine] ElevenLabs: playing!');
       this.setState('speaking');
 
       sound.setOnPlaybackStatusUpdate((status) => {
         if ('didJustFinish' in status && status.didJustFinish) {
-          FileSystem.deleteAsync(audioFile, { idempotent: true }).catch(() => {});
-          this.onSpeechDone();
+          sound.setOnPlaybackStatusUpdate(null);
+          this.finalizeSoundPlayback(sound, audioFile, playbackGeneration).catch((error) => {
+            console.warn('[VoiceEngine] Failed to finalize ElevenLabs playback:', error);
+          });
         }
       });
     } catch (e: unknown) {
       const errMsg = e instanceof Error ? e.message : String(e);
+      track('voice_tts_failed', { provider: 'elevenlabs', error_category: categorizeError(errMsg) });
       console.warn('[VoiceEngine] ElevenLabs TTS failed:', errMsg);
       const authFailed = ELEVENLABS_AUTH_FAILURE.test(errMsg);
 
@@ -455,44 +536,64 @@ class VoiceEngineService {
         return;
       }
 
-      this.onSpeechDone();
+      await this.onSpeechDone();
     }
   }
 
-  private onSpeechDone(): void {
-    if (this.continuousMode) {
-      // Resume listening after response
+  private async finalizeSoundPlayback(sound: Audio.Sound, audioFile: string, generation: number): Promise<void> {
+    if (generation !== this.playbackGeneration) return;
+
+    try {
+      await sound.unloadAsync();
+    } catch {
+      // Sound may already be unloaded after an interruption or manual stop.
+    }
+
+    if (this.sound === sound) {
+      this.sound = null;
+    }
+
+    await FileSystem.deleteAsync(audioFile, { idempotent: true }).catch(() => {});
+    await this.onSpeechDone(generation);
+  }
+
+  private async onSpeechDone(generation = this.playbackGeneration): Promise<void> {
+    if (generation !== this.playbackGeneration) return;
+
+    const shouldResume = this.continuousMode;
+    this.setState('idle');
+    await this.usePlaybackAudioMode(false).catch(() => {});
+
+    if (!shouldResume) return;
+
+    this.clearPostTtsTimer();
+    this.postTtsTimer = setTimeout(() => {
+      if (generation !== this.playbackGeneration || !this.continuousMode || this._state !== 'idle') return;
       this.startListening(true).catch((e) => {
         console.warn('[VoiceEngine] Failed to resume listening:', e);
       });
-    } else {
-      this.setState('idle');
-      this.usePlaybackAudioMode(false).catch(() => {});
-    }
+    }, POST_TTS_COOLDOWN_MS);
   }
 
   async stopSpeaking(): Promise<void> {
-    const wasContinuous = this.continuousMode;
+    this.continuousMode = false;
+    this.playbackGeneration += 1;
+    this.clearPostTtsTimer();
     try {
       await this.stopTts();
       await this.stopSound();
     } catch {
       // Ignore
     }
-    // If in continuous mode, resume listening instead of going idle
-    if (wasContinuous) {
-      this.startListening(true).catch((e) => {
-        console.warn('[VoiceEngine] Failed to resume listening:', e);
-      });
-    } else {
-      this.setState('idle');
-    }
+    await this.usePlaybackAudioMode(false).catch(() => {});
+    this.setState('idle');
   }
 
   async suspend(options: SuspendOptions = {}): Promise<void> {
     return this.enqueueOperation(async () => {
       this.continuousMode = false;
-      this.clearSilenceTimer();
+      this.clearListeningTimers();
+      this.clearPostTtsTimer();
       this.latestTranscript = '';
       await this.finishElevenLabsRecording('cancel');
       if (!options.keepPlayback) {
@@ -536,8 +637,11 @@ class VoiceEngineService {
   }
 
   private async prepareForPlayback(): Promise<void> {
-    this.clearSilenceTimer();
+    this.playbackGeneration += 1;
+    this.clearListeningTimers();
+    this.clearPostTtsTimer();
     this.latestTranscript = '';
+    await this.finishElevenLabsRecording('cancel');
     await this.stopRecognition('cancel');
     await this.stopSound();
     await this.stopTts();
@@ -547,6 +651,7 @@ class VoiceEngineService {
   private async useRecordingAudioMode(): Promise<void> {
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: true,
+      interruptionModeIOS: InterruptionModeIOS.DoNotMix,
       playsInSilentModeIOS: true,
       staysActiveInBackground: false,
     });
@@ -555,6 +660,7 @@ class VoiceEngineService {
   private async usePlaybackAudioMode(staysActiveInBackground: boolean): Promise<void> {
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: false,
+      interruptionModeIOS: InterruptionModeIOS.DuckOthers,
       playsInSilentModeIOS: true,
       staysActiveInBackground,
     });
@@ -566,7 +672,8 @@ class VoiceEngineService {
 
   async destroy(): Promise<void> {
     return this.enqueueOperation(async () => {
-      this.clearSilenceTimer();
+      this.clearListeningTimers();
+      this.clearPostTtsTimer();
       this.continuousMode = false;
       this.latestTranscript = '';
       await this.finishElevenLabsRecording('cancel');
@@ -611,6 +718,134 @@ class VoiceEngineService {
     }
   }
 
+  private clearNoSpeechTimer(): void {
+    if (this.noSpeechTimer) {
+      clearTimeout(this.noSpeechTimer);
+      this.noSpeechTimer = null;
+    }
+  }
+
+  private clearStuckListeningTimer(): void {
+    if (this.stuckListeningTimer) {
+      clearTimeout(this.stuckListeningTimer);
+      this.stuckListeningTimer = null;
+    }
+  }
+
+  private clearPostTtsTimer(): void {
+    if (this.postTtsTimer) {
+      clearTimeout(this.postTtsTimer);
+      this.postTtsTimer = null;
+    }
+  }
+
+  private clearListeningTimers(): void {
+    this.clearSilenceTimer();
+    this.clearNoSpeechTimer();
+    this.clearStuckListeningTimer();
+  }
+
+  private resetListeningSession(): void {
+    this.clearListeningTimers();
+    this.speechStarted = false;
+    this.lastSpeechActivityAt = 0;
+    this.listeningStartedAt = Date.now();
+    this.listeningGeneration += 1;
+  }
+
+  private markListeningStarted(): void {
+    const generation = this.listeningGeneration;
+    this.noSpeechTimer = setTimeout(() => {
+      this.handleNoSpeechTimeout(generation).catch((error) => {
+        console.warn('[VoiceEngine] Failed to handle no-speech timeout:', error);
+      });
+    }, NO_SPEECH_TIMEOUT_MS);
+    this.scheduleStuckListeningGuard(generation);
+  }
+
+  private markSpeechActivity(): void {
+    this.speechStarted = true;
+    this.lastSpeechActivityAt = Date.now();
+    this.clearNoSpeechTimer();
+  }
+
+  private scheduleStuckListeningGuard(generation = this.listeningGeneration): void {
+    this.clearStuckListeningTimer();
+    this.stuckListeningTimer = setTimeout(() => {
+      this.handleStuckListeningGuard(generation).catch((error) => {
+        console.warn('[VoiceEngine] Failed to recover stuck listener:', error);
+      });
+    }, STUCK_LISTENING_GUARD_MS);
+  }
+
+  private async handleNoSpeechTimeout(generation: number): Promise<void> {
+    if (generation !== this.listeningGeneration || this._state !== 'listening' || this.speechStarted) return;
+
+    this.continuousMode = false;
+    this.latestTranscript = '';
+    if (this.recordingProvider === 'elevenlabs' || this.recording) {
+      await this.finishElevenLabsRecording('noSpeech');
+      return;
+    }
+    await this.stopRecognition('cancel');
+    this.clearListeningTimers();
+    this.notifyError('I did not hear anything. Tap to try again.');
+    if (this._state === 'listening' || this._state === 'thinking') {
+      this.setState('idle');
+    }
+  }
+
+  private async handleStuckListeningGuard(generation: number): Promise<void> {
+    if (generation !== this.listeningGeneration || this._state !== 'listening') return;
+
+    const recentSpeech = this.lastSpeechActivityAt > 0
+      && Date.now() - this.lastSpeechActivityAt < ACTIVE_SPEECH_GRACE_MS;
+    if (recentSpeech) {
+      this.scheduleStuckListeningGuard(generation);
+      return;
+    }
+
+    if (this.latestTranscript.trim()) {
+      await this.finalizeCurrentTranscript('stuckGuard');
+      return;
+    }
+
+    this.continuousMode = false;
+    await this.finishElevenLabsRecording(this.speechStarted ? 'stuck' : 'noSpeech');
+    await this.stopRecognition('cancel');
+    this.clearListeningTimers();
+    this.notifyError(
+      this.speechStarted
+        ? 'Microphone lost the end of your speech. Tap to try again.'
+        : 'I did not hear clear speech. Tap to try again.',
+    );
+    if (this._state === 'listening' || this._state === 'thinking') {
+      this.setState('idle');
+    }
+  }
+
+  private async finalizeCurrentTranscript(reason: 'silence' | 'manual' | 'speechEnd' | 'stuckGuard'): Promise<void> {
+    if (this._state !== 'listening' && reason !== 'manual') return;
+
+    const finalText = this.latestTranscript.trim();
+    this.latestTranscript = '';
+    this.clearListeningTimers();
+
+    if (finalText) {
+      this.transcriptListeners.forEach((l) => l(finalText, true));
+    }
+
+    if (this.recordingProvider === 'elevenlabs' || this.recording) {
+      await this.finishElevenLabsRecording(reason === 'manual' ? 'manual' : 'silence');
+      return;
+    }
+
+    await this.stopRecognition('stop');
+    if (this._state === 'listening') {
+      this.setState('idle');
+    }
+  }
+
   private async handleSilenceTimeout(): Promise<void> {
     if (this._state !== 'listening') return;
 
@@ -620,12 +855,7 @@ class VoiceEngineService {
     }
 
     if (this.latestTranscript.trim()) {
-      const finalText = this.latestTranscript;
-      this.latestTranscript = '';
-      this.transcriptListeners.forEach((l) => l(finalText, true));
-
-      // Stop the recognition session
-      await this.enqueueOperation(() => this.stopRecognition('stop'));
+      await this.finalizeCurrentTranscript('silence');
     }
   }
 
@@ -634,6 +864,7 @@ class VoiceEngineService {
     const text = e.value?.[0] || '';
     if (text) {
       this.latestTranscript = text;
+      this.markSpeechActivity();
       this.transcriptListeners.forEach((l) => l(text, false));
       this.resetSilenceTimer();
     }
@@ -644,13 +875,14 @@ class VoiceEngineService {
     const text = e.value?.[0] || '';
     if (text) {
       this.latestTranscript = text;
+      this.markSpeechActivity();
       this.transcriptListeners.forEach((l) => l(text, false));
       this.resetSilenceTimer();
     }
   }
 
   private onSpeechError(e: SpeechErrorEvent) {
-    this.clearSilenceTimer();
+    this.clearListeningTimers();
     this.recognizing = false;
     const code = (e.error as Record<string, unknown>)?.code ?? e.error;
 
@@ -664,7 +896,7 @@ class VoiceEngineService {
     }
 
     console.warn('[VoiceEngine] Speech error:', code, e.error);
-    this.notifyError(typeof code === 'string' ? code : 'Speech recognition error');
+    this.notifyError(formatSpeechError(code));
     this.continuousMode = false;
 
     const elapsed = Date.now() - this.listeningStartedAt;
@@ -677,9 +909,10 @@ class VoiceEngineService {
     }
 
     if (this.latestTranscript.trim()) {
-      const finalText = this.latestTranscript;
-      this.latestTranscript = '';
-      this.transcriptListeners.forEach((l) => l(finalText, true));
+      this.finalizeCurrentTranscript('speechEnd').catch((error) => {
+        console.warn('[VoiceEngine] Failed to finalize speech error transcript:', error);
+      });
+      return;
     }
 
     if (this._state === 'listening') {
@@ -688,7 +921,7 @@ class VoiceEngineService {
   }
 
   private onSpeechEnd() {
-    this.clearSilenceTimer();
+    this.clearListeningTimers();
     this.recognizing = false;
     const elapsed = Date.now() - this.listeningStartedAt;
 
@@ -701,9 +934,10 @@ class VoiceEngineService {
     }
 
     if (this.latestTranscript.trim()) {
-      const finalText = this.latestTranscript;
-      this.latestTranscript = '';
-      this.transcriptListeners.forEach((l) => l(finalText, true));
+      this.finalizeCurrentTranscript('speechEnd').catch((error) => {
+        console.warn('[VoiceEngine] Failed to finalize speech transcript:', error);
+      });
+      return;
     }
 
     if (this._state === 'listening') {
@@ -744,9 +978,10 @@ class VoiceEngineService {
 
     this.latestTranscript = '';
     this.recordingHeardSpeech = false;
+    this.speechStarted = false;
+    this.lastSpeechActivityAt = 0;
     this.recordingSilentSince = 0;
     this.transcriptionInProgress = false;
-    this.listeningStartedAt = Date.now();
 
     try {
       const recording = new Audio.Recording();
@@ -759,12 +994,16 @@ class VoiceEngineService {
       this.recording = recording;
       this.recordingProvider = 'elevenlabs';
       this.setInputProvider('elevenlabs');
+      if (!this.listeningStartedAt) {
+        this.resetListeningSession();
+      }
+      this.markListeningStarted();
       this.setState('listening');
     } catch (error) {
       this.recording = null;
       this.recordingProvider = null;
       console.warn('[VoiceEngine] Failed to start ElevenLabs recording:', error);
-      this.notifyError(error instanceof Error ? error.message : 'Could not start recording');
+      this.notifyError(formatAudioError(error));
       this.setState('idle');
     }
   }
@@ -775,11 +1014,26 @@ class VoiceEngineService {
 
     const elapsed = status.durationMillis || (Date.now() - this.listeningStartedAt);
     const metering = typeof status.metering === 'number' ? status.metering : null;
-    if (metering === null) return;
+    if (metering === null) {
+      if (!this.recordingHeardSpeech && elapsed >= NO_SPEECH_TIMEOUT_MS) {
+        this.enqueueOperation(() => this.finishElevenLabsRecording('noSpeech')).catch((error) => {
+          console.warn('[VoiceEngine] Failed to finish quiet ElevenLabs recording:', error);
+        });
+      }
+      return;
+    }
 
     if (metering > VoiceEngineService.STT_SPEECH_THRESHOLD_DB) {
       this.recordingHeardSpeech = true;
+      this.markSpeechActivity();
       this.recordingSilentSince = 0;
+      return;
+    }
+
+    if (!this.recordingHeardSpeech && elapsed >= NO_SPEECH_TIMEOUT_MS) {
+      this.enqueueOperation(() => this.finishElevenLabsRecording('noSpeech')).catch((error) => {
+        console.warn('[VoiceEngine] Failed to finish no-speech ElevenLabs recording:', error);
+      });
       return;
     }
 
@@ -803,7 +1057,7 @@ class VoiceEngineService {
     }
   }
 
-  private async finishElevenLabsRecording(reason: 'cancel' | 'manual' | 'silence'): Promise<void> {
+  private async finishElevenLabsRecording(reason: 'cancel' | 'manual' | 'silence' | 'noSpeech' | 'stuck'): Promise<void> {
     const recording = this.recording;
     if (!recording || this.transcriptionInProgress) return;
 
@@ -811,6 +1065,7 @@ class VoiceEngineService {
     this.recording = null;
     this.recordingProvider = null;
     this.recordingSilentSince = 0;
+    this.clearListeningTimers();
 
     recording.setOnRecordingStatusUpdate(null);
     const audioUri = recording.getURI();
@@ -821,9 +1076,21 @@ class VoiceEngineService {
       console.warn('[VoiceEngine] Failed to stop ElevenLabs recording:', error);
     }
 
-    if (reason === 'cancel') {
+    if (
+      reason === 'cancel'
+      || reason === 'noSpeech'
+      || reason === 'stuck'
+      || Date.now() - this.listeningStartedAt < QUICK_MANUAL_STOP_MS
+    ) {
       this.transcriptionInProgress = false;
       this.setState('idle');
+      if (reason === 'noSpeech') {
+        this.continuousMode = false;
+        this.notifyError('I did not hear anything. Tap to try again.');
+      } else if (reason === 'stuck') {
+        this.continuousMode = false;
+        this.notifyError('Microphone did not finish cleanly. Tap to try again.');
+      }
       if (audioUri) {
         FileSystem.deleteAsync(audioUri, { idempotent: true }).catch(() => {});
       }
@@ -844,7 +1111,8 @@ class VoiceEngineService {
         throw new ElevenLabsSpeechError('ElevenLabs API key is missing.');
       }
 
-      const text = await transcribeWithElevenLabs(audioUri, apiKey);
+      const language = await getVoiceLanguage();
+      const text = await transcribeWithElevenLabs(audioUri, apiKey, language.languageCode);
       if (text) {
         this.transcriptListeners.forEach((l) => l(text, true));
       } else {

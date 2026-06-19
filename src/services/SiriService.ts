@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import { categorizeError, track } from '@/services/AnalyticsService';
 
 // Siri Shortcuts are iOS-only
 const isSiriAvailable = Platform.OS === 'ios';
@@ -59,7 +60,9 @@ export async function donateSiriShortcut(): Promise<void> {
 
   try {
     mod.donateShortcut(ASK_SHORTCUT);
+    track('siri_shortcut_suggested', { action: 'donate' });
   } catch (e) {
+    track('siri_shortcut_failed', { error_category: categorizeError(e) });
     console.warn('[Siri] Failed to donate shortcut:', e);
   }
 }
@@ -81,6 +84,7 @@ export async function addSiriShortcut(): Promise<void> {
 
   try {
     mod.donateShortcut(ASK_SHORTCUT);
+    track('siri_shortcut_suggested', { action: 'add' });
 
     if (mod.supportsPresentShortcut && typeof mod.presentShortcut === 'function') {
       let callbackReceived = false;
@@ -104,6 +108,7 @@ export async function addSiriShortcut(): Promise<void> {
         clearTimeout(fallbackTimer);
 
         if (data.status === 'added' || data.status === 'updated') {
+          track('siri_shortcut_suggested', { action: data.status });
           Alert.alert(
             'Shortcut Ready',
             data.phrase
@@ -119,6 +124,9 @@ export async function addSiriShortcut(): Promise<void> {
         }
 
         if (data.status === 'cancelled') {
+          if (data.error) {
+            track('siri_shortcut_failed', { error_category: categorizeError(data.error) });
+          }
           if (isShortcutsAppMissing(data.error)) {
             showShortcutsAppRequiredAlert();
           } else if (data.error) {
@@ -147,6 +155,7 @@ export async function addSiriShortcut(): Promise<void> {
       },
     ]);
   } catch (e) {
+    track('siri_shortcut_failed', { error_category: categorizeError(e) });
     console.warn('[Siri] Failed to donate shortcut:', e);
     Alert.alert('Error', 'Failed to add Siri shortcut. Please try again.');
   }

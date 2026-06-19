@@ -6,20 +6,29 @@ import {
   StyleSheet,
   Animated,
   AppState,
+  Linking,
   type AppStateStatus,
 } from 'react-native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
 import * as Updates from 'expo-updates';
-import * as Notifications from 'expo-notifications';
+import type * as ExpoNotifications from 'expo-notifications';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, fontSize, spacing, borderRadius } from '@/constants/theme';
 import { GatewayProvider } from '@/contexts/GatewayContext';
+import { addCarPlayCommandListener } from '@/services/CarPlayBridge';
+import { addWatchCommandListener } from '@/services/WatchBridge';
 import { addSiriVoiceLaunchListener, getInitialSiriVoiceLaunch } from '@/services/SiriService';
+import { captureCampaignFromUrl, initializeAnalytics, track } from '@/services/AnalyticsService';
 
 SplashScreen.preventAutoHideAsync();
+
+function getNotifications(): typeof ExpoNotifications | null {
+  if (__DEV__) return null;
+  return require('expo-notifications') as typeof ExpoNotifications;
+}
 
 type UpdateStatus = 'idle' | 'checking' | 'downloading' | 'ready' | 'error';
 
@@ -182,14 +191,33 @@ export default function RootLayout() {
     return () => clearTimeout(timer);
   }, [onLayoutReady]);
 
+  useEffect(() => {
+    initializeAnalytics()
+      .then(() => track('app_opened', { screen: 'root' }))
+      .catch(() => {});
+
+    Linking.getInitialURL()
+      .then(captureCampaignFromUrl)
+      .catch(() => {});
+
+    const sub = Linking.addEventListener('url', ({ url }) => {
+      captureCampaignFromUrl(url).catch(() => {});
+    });
+
+    return () => sub.remove();
+  }, []);
+
   // Request notification permissions
   useEffect(() => {
-    Notifications.requestPermissionsAsync().catch(() => {});
+    const notifications = getNotifications();
+    notifications?.requestPermissionsAsync().catch(() => {});
   }, []);
 
   // Handle notification tap → navigate to chat
   useEffect(() => {
-    const sub = Notifications.addNotificationResponseReceivedListener(() => {
+    const notifications = getNotifications();
+    if (!notifications) return;
+    const sub = notifications.addNotificationResponseReceivedListener(() => {
       router.push('/chat');
     });
     return () => sub.remove();
@@ -222,6 +250,60 @@ export default function RootLayout() {
     };
   }, [router]);
 
+  // Handle CarPlay launch/control → navigate to voice mode
+  useEffect(() => {
+    return addCarPlayCommandListener((command) => {
+      if (
+        command.action !== 'startVoice'
+        && command.action !== 'toggleVoice'
+        && command.action !== 'stopAudio'
+        && command.action !== 'pauseVoice'
+      ) return;
+      track('carplay_opened', { action: command.action, carplay: true });
+      if (command.action === 'startVoice' || command.action === 'toggleVoice') {
+        track('carplay_voice_started', { carplay: true });
+      } else if (command.action === 'pauseVoice') {
+        track('carplay_voice_paused', { carplay: true });
+      } else if (command.action === 'stopAudio') {
+        track('carplay_audio_stopped', { carplay: true });
+      }
+      router.replace({
+        pathname: '/voice',
+        params: {
+          carplayStart: String(command.timestamp ?? Date.now()),
+          carplayAction: command.action,
+        },
+      });
+    });
+  }, [router]);
+
+  // Handle Apple Watch launch/control → navigate to voice mode
+  useEffect(() => {
+    return addWatchCommandListener((command) => {
+      if (
+        command.action !== 'startVoice'
+        && command.action !== 'stopAudio'
+        && command.action !== 'pauseVoice'
+        && command.action !== 'requestStatus'
+      ) return;
+      track('watch_opened', { action: command.action, watch: true });
+      if (command.action === 'startVoice') {
+        track('watch_voice_started', { watch: true });
+      } else if (command.action === 'pauseVoice') {
+        track('watch_voice_paused', { watch: true });
+      } else if (command.action === 'stopAudio') {
+        track('watch_audio_stopped', { watch: true });
+      }
+      router.replace({
+        pathname: '/voice',
+        params: {
+          watchStart: String(command.timestamp ?? Date.now()),
+          watchAction: command.action,
+        },
+      });
+    });
+  }, [router]);
+
   return (
     <GatewayProvider>
       <StatusBar style="light" />
@@ -251,7 +333,7 @@ export default function RootLayout() {
         />
         <Stack.Screen
           name="chat"
-          options={{ title: 'iClawd', headerBackTitle: 'Back' }}
+          options={{ title: 'ClawVoice', headerBackTitle: 'Back' }}
         />
         <Stack.Screen
           name="voice"

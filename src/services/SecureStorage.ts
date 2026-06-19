@@ -1,4 +1,4 @@
-import * as SecureStore from 'expo-secure-store';
+import * as SecureStore from '@/services/SafeSecureStore';
 import type { GatewayConfig } from '@/types/gateway';
 
 const GATEWAY_CONFIG_KEY = 'iclawd_gateway_config';

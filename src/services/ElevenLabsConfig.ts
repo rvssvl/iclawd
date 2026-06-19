@@ -1,4 +1,4 @@
-import * as SecureStore from 'expo-secure-store';
+import * as SecureStore from '@/services/SafeSecureStore';
 
 export const ELEVENLABS_KEY = 'iclawd_elevenlabs_key';
 export const ELEVENLABS_TTS_VOICE_ID = 'iclawd_elevenlabs_voice_id';

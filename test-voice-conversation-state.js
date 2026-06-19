@@ -5,7 +5,7 @@ const ts = require('typescript');
 
 const sourcePath = path.join(__dirname, 'src/hooks/voiceConversationState.ts');
 const source = fs.readFileSync(sourcePath, 'utf8')
-  .replace("import type { VoiceState } from '@/services/VoiceEngine';", "type VoiceState = 'idle' | 'listening' | 'thinking' | 'speaking';");
+  .replace("import type { VoiceState } from '@/services/VoiceEngine';", "type VoiceState = 'idle' | 'listening' | 'thinking' | 'preparingAudio' | 'speaking';");
 
 const compiled = ts.transpileModule(source, {
   compilerOptions: {
@@ -75,7 +75,16 @@ assert.equal(
     { type: 'TTS_STARTED' },
     { type: 'TTS_DONE' },
   ).status,
-  'starting',
+  'recovering',
+);
+
+assert.equal(
+  reduce(
+    { type: 'RESUME_MIC' },
+    { type: 'TTS_STARTED' },
+    { type: 'PAUSE_MIC' },
+  ).status,
+  'paused',
 );
 
 assert.equal(

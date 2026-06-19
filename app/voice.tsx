@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useCallback, useMemo } from 'react';
 import { View, Text, StyleSheet, Pressable, FlatList } from 'react-native';
 import Animated, { FadeIn } from 'react-native-reanimated';
-import { useFocusEffect, useRouter, Stack } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { colors, spacing, fontSize } from '@/constants/theme';
@@ -10,6 +10,9 @@ import { useVoiceConversation } from '@/hooks/useVoiceConversation';
 import { VoiceOrb } from '@/components/VoiceOrb';
 import { ChatBubble } from '@/components/ChatBubble';
 import { TypingIndicator } from '@/components/ui/TypingIndicator';
+import { setCarPlayStatus, type CarPlayStatus } from '@/services/CarPlayBridge';
+import { setWatchStatus, type WatchStatus } from '@/services/WatchBridge';
+import { track } from '@/services/AnalyticsService';
 import type { ChatMessage } from '@/types/gateway';
 
 const ORB_DOCK_HEIGHT = 238;
@@ -17,18 +20,27 @@ const ORB_FADE_STEPS = [0.02, 0.08, 0.18, 0.34, 0.56, 0.78, 0.94];
 
 export default function VoiceChatScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{
+    carplayStart?: string;
+    carplayAction?: string;
+    watchStart?: string;
+    watchAction?: string;
+  }>();
   const {
     connectionState,
     messages,
     streamingText,
     streamingId,
     awaitingResponse,
+    connectionError,
     sendMessage,
     reconnect,
   } = useGatewayContext();
 
   const flatListRef = useRef<FlatList>(null);
   const lastSpokenIdRef = useRef<string | null>(null);
+  const handledCarPlayStartRef = useRef<string | null>(null);
+  const handledWatchStartRef = useRef<string | null>(null);
   const isConnected = connectionState === 'connected';
   const isConnecting = connectionState === 'connecting' || connectionState === 'reconnecting';
   const latestAssistantId = useMemo(() => {
@@ -52,6 +64,94 @@ export default function VoiceChatScreen() {
     sendMessage,
     reconnect,
   });
+
+  const handleCarPlayVoiceCommand = useCallback(() => {
+    if (!isConnected) {
+      reconnect();
+      return;
+    }
+    toggleMic();
+  }, [isConnected, reconnect, toggleMic]);
+
+  useEffect(() => {
+    const token = params.carplayStart;
+    if (!token || handledCarPlayStartRef.current === token) return;
+    handledCarPlayStartRef.current = token;
+    handleCarPlayVoiceCommand();
+  }, [handleCarPlayVoiceCommand, params.carplayStart]);
+
+  useEffect(() => {
+    const token = params.watchStart;
+    if (!token || handledWatchStartRef.current === token) return;
+    handledWatchStartRef.current = token;
+    if (!isConnected) {
+      track('watch_connection_failed', { watch: true, error_category: 'network' });
+    }
+    handleCarPlayVoiceCommand();
+  }, [handleCarPlayVoiceCommand, isConnected, params.watchStart]);
+
+  useEffect(() => {
+    const remoteStatus: CarPlayStatus & WatchStatus = (() => {
+      if (connectionState !== 'connected') {
+        return {
+          state: 'connecting',
+          title: isConnecting ? 'Connecting to agent' : 'Gateway disconnected',
+          subtitle: isConnecting ? 'Reconnecting on iPhone' : 'Open iPhone to reconnect',
+        };
+      }
+
+      switch (conversationState.status) {
+        case 'starting':
+          return {
+            state: 'connecting',
+            title: 'Starting microphone',
+            subtitle: statusLabel || 'Preparing voice session',
+          };
+        case 'listening':
+          return {
+            state: 'listening',
+            title: 'Listening',
+            subtitle: (transcript || '').trim() || 'Speak now',
+          };
+        case 'finalizing':
+        case 'awaitingAgent':
+        case 'agentStreaming':
+          return {
+            state: 'thinking',
+            title: 'Agent is responding',
+            subtitle: statusLabel || 'Waiting for response',
+          };
+        case 'recovering':
+          return {
+            state: 'paused',
+            title: 'Voice will resume',
+            subtitle: statusLabel || 'Cooling down audio',
+          };
+        case 'speaking':
+          return {
+            state: 'speaking',
+            title: 'Speaking response',
+            subtitle: 'Playing audio on iPhone',
+          };
+        case 'error':
+          return {
+            state: 'error',
+            title: 'Voice unavailable',
+            subtitle: conversationState.error || 'Check iPhone',
+          };
+        case 'paused':
+        default:
+          return {
+            state: 'paused',
+            title: 'Voice paused',
+            subtitle: 'Start voice to resume',
+          };
+      }
+    })();
+
+    setCarPlayStatus(remoteStatus);
+    setWatchStatus(remoteStatus);
+  }, [connectionState, conversationState.error, conversationState.status, isConnecting, statusLabel, transcript]);
 
   useFocusEffect(
     useCallback(() => {
@@ -115,13 +215,13 @@ export default function VoiceChatScreen() {
             </View>
           ),
           headerLeft: () => (
-            <Pressable onPress={handleChatPress} style={{ padding: spacing.xs }}>
-              <Ionicons name="chatbubble-outline" size={22} color={colors.textSecondary} />
+            <Pressable onPress={handleChatPress} style={styles.headerIconButton}>
+              <Ionicons name="chatbubble-outline" size={22} color={colors.textSecondary} style={styles.headerIconLeft} />
             </Pressable>
           ),
           headerRight: () => (
-            <Pressable onPress={() => router.push('/settings')} style={{ padding: spacing.xs }}>
-              <Ionicons name="settings-outline" size={22} color={colors.textSecondary} />
+            <Pressable onPress={() => router.push('/settings')} style={styles.headerIconButton}>
+              <Ionicons name="settings-outline" size={22} color={colors.textSecondary} style={styles.headerIcon} />
             </Pressable>
           ),
         }}
@@ -171,7 +271,7 @@ export default function VoiceChatScreen() {
             disabled={!isConnected}
             connecting={isConnecting}
             busy={isBusy}
-            statusLabel={statusLabel}
+            statusLabel={!isConnected && connectionError ? connectionError : statusLabel}
           />
         </Animated.View>
       </View>
@@ -183,6 +283,26 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.background,
+  },
+  headerIconButton: {
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  headerIcon: {
+    width: 22,
+    height: 22,
+    lineHeight: 22,
+    textAlign: 'center',
+    transform: [{ translateY: -2 }],
+  },
+  headerIconLeft: {
+    width: 22,
+    height: 22,
+    lineHeight: 22,
+    textAlign: 'center',
+    transform: [{ translateX: 1 }, { translateY: -2 }],
   },
   messageList: {
     flex: 1,

@@ -14,9 +14,11 @@ import type {
   ChatMessage,
 } from '@/types/gateway';
 import { updateDeviceToken } from '@/services/SecureStorage';
-import * as SecureStore from 'expo-secure-store';
+import * as SecureStore from '@/services/SafeSecureStore';
+import { getVoiceLanguage } from '@/services/VoiceLanguageConfig';
 
 const PROTOCOL_VERSION = 3;
+const PROTOCOL_MAX_VERSION = 4;
 const APP_VERSION = '2.0.0';
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
@@ -30,6 +32,7 @@ type ConnectionListener = (state: ConnectionState) => void;
 type MessageListener = (message: ChatMessage) => void;
 type StreamListener = (partialText: string, messageId: string) => void;
 type ActivityListener = (active: boolean) => void;
+type ErrorListener = (error: string) => void;
 
 let idCounter = 0;
 function nextId(): string {
@@ -168,6 +171,7 @@ export class GatewayClient {
   private messageListeners = new Set<MessageListener>();
   private streamListeners = new Set<StreamListener>();
   private activityListeners = new Set<ActivityListener>();
+  private errorListeners = new Set<ErrorListener>();
   private disposed = false;
   private supportedMethods = new Set<string>();
   private authScopes = new Set<string>();
@@ -205,6 +209,11 @@ export class GatewayClient {
     return () => this.activityListeners.delete(listener);
   }
 
+  onError(listener: ErrorListener): () => void {
+    this.errorListeners.add(listener);
+    return () => this.errorListeners.delete(listener);
+  }
+
   async connect(): Promise<void> {
     if (this.disposed) return;
     this.setState('connecting');
@@ -224,12 +233,14 @@ export class GatewayClient {
 
         this.clearConnectTimeout();
         this.connectTimeoutTimer = setTimeout(() => {
+          const error = new Error('Connection timeout');
           const rejectConnect = this.connectReject;
           this.connectResolve = null;
           this.connectReject = null;
           this.connectRequestId = null;
           this.setState('error');
-          rejectConnect?.(new Error('Connection timeout'));
+          this.notifyError(error.message);
+          rejectConnect?.(error);
           this.ws?.close();
         }, 15000);
 
@@ -245,8 +256,10 @@ export class GatewayClient {
 
         ws.onerror = () => {
           this.clearConnectTimeout();
+          const error = new Error('WebSocket error');
+          this.notifyError(error.message);
           if (this.connectReject) {
-            this.connectReject(new Error('WebSocket error'));
+            this.connectReject(error);
             this.connectResolve = null;
             this.connectReject = null;
             this.connectRequestId = null;
@@ -258,7 +271,9 @@ export class GatewayClient {
           this.clearConnectTimeout();
           this.stopTickWatch();
           if (this.connectReject) {
-            this.connectReject(new Error('Connection closed'));
+            const error = new Error('Connection closed');
+            this.notifyError(error.message);
+            this.connectReject(error);
             this.connectResolve = null;
             this.connectReject = null;
             this.connectRequestId = null;
@@ -318,7 +333,7 @@ export class GatewayClient {
 
   // --- Private ---
 
-  private handleChallengeAndConnect(challengeNonce: string): void {
+  private async handleChallengeAndConnect(challengeNonce: string): Promise<void> {
     console.log('[Gateway] Challenge received, nonce:', challengeNonce.substring(0, 20) + '...');
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.deviceIdentity) return;
 
@@ -329,6 +344,7 @@ export class GatewayClient {
     const clientMode = 'ui';
     const role = 'operator';
     const scopes: string[] = ['operator.read', 'operator.write'];
+    const language = await getVoiceLanguage();
 
     // Build pipe-delimited payload and sign it
     const payload = buildSignPayload(
@@ -342,7 +358,7 @@ export class GatewayClient {
 
     const params: ConnectParams = {
       minProtocol: PROTOCOL_VERSION,
-      maxProtocol: PROTOCOL_VERSION,
+      maxProtocol: PROTOCOL_MAX_VERSION,
       client: {
         id: clientId,
         version: APP_VERSION,
@@ -354,8 +370,11 @@ export class GatewayClient {
       caps: ['voice'],
       commands: [],
       permissions: {},
-      auth: { token: this.config.token },
-      locale: 'en-US',
+      auth: {
+        token: this.config.token,
+        ...(this.config.deviceToken ? { deviceToken: this.config.deviceToken } : {}),
+      },
+      locale: language.locale,
       userAgent: `iclawd/${APP_VERSION} (${Platform.OS})`,
       device: {
         id: identity.id,
@@ -386,6 +405,7 @@ export class GatewayClient {
       }
       if (payload?.auth?.deviceToken) {
         await updateDeviceToken(payload.auth.deviceToken);
+        this.config = { ...this.config, deviceToken: payload.auth.deviceToken };
       }
       this.supportedMethods = new Set(payload?.features?.methods || []);
       this.authScopes = new Set(payload?.auth?.scopes || []);
@@ -395,8 +415,13 @@ export class GatewayClient {
       this.connectResolve?.();
     } else {
       const errMsg = frame.error?.message || 'Connection rejected';
+      this.notifyError(formatGatewayError(frame.error?.code, errMsg));
+      if (frame.error?.retryable) {
+        this.scheduleReconnect(frame.error.retryAfterMs);
+      } else {
+        this.setState('error');
+      }
       this.connectReject?.(new Error(errMsg));
-      this.setState('error');
     }
     this.connectResolve = null;
     this.connectReject = null;
@@ -463,7 +488,10 @@ export class GatewayClient {
       if (evtFrame.event === 'connect.challenge') {
         const payload = evtFrame.payload || evtFrame.data || {};
         const nonce = (payload.nonce as string) || '';
-        this.handleChallengeAndConnect(nonce);
+        this.handleChallengeAndConnect(nonce).catch((error) => {
+          console.warn('[Gateway] Failed to answer connect challenge:', error);
+          this.setState('error');
+        });
         return;
       }
       this.handleEvent(evtFrame);
@@ -483,7 +511,7 @@ export class GatewayClient {
   }
 
   private handleEvent(frame: EventFrame): void {
-    const payload = frame.data || (frame as unknown as { payload: Record<string, unknown> }).payload || {};
+    const payload = frame.data || frame.payload || {};
 
     // Tick events: reset the tick watch timer (server keepalive)
     if (frame.event === 'tick') {
@@ -519,18 +547,23 @@ export class GatewayClient {
       // Chat state events (delta + final)
       case 'chat': {
         const state = (payload.state as string) || '';
-        const message = (payload.message as Record<string, unknown>) || {};
+        const runId = getString(payload.runId) || getString(payload.id) || 'main';
+
+        if (state === 'delta') {
+          const delta = getString(payload.deltaText)
+            || getString(payload.delta)
+            || getString(payload.text);
+          if (delta) {
+            this.activityListeners.forEach((l) => l(true));
+            this.streamListeners.forEach((l) => l(delta, runId));
+          }
+        }
 
         if (state === 'final') {
           this.activityListeners.forEach((l) => l(false));
-          // Extract text from content array
-          const content = (message.content as Array<{ type: string; text: string }>) || [];
-          const text = content
-            .filter((c) => c.type === 'text')
-            .map((c) => c.text)
-            .join('');
+          const text = extractMessageText(payload.message as Record<string, unknown> | undefined)
+            || getString(payload.text);
 
-          const runId = (payload.runId as string) || nextId();
           if (text) {
             const msg: ChatMessage = {
               id: runId,
@@ -540,6 +573,29 @@ export class GatewayClient {
             };
             this.messageListeners.forEach((l) => l(msg));
           }
+        }
+
+        if (state === 'error' || state === 'aborted') {
+          this.activityListeners.forEach((l) => l(false));
+          if (state === 'error') {
+            this.notifyError(getString(payload.error) || 'Gateway chat error');
+          }
+        }
+        break;
+      }
+
+      case 'session.message': {
+        const message = (payload.message as Record<string, unknown>) || payload;
+        const role = getString(message.role);
+        const text = extractMessageText(message);
+        if (role === 'assistant' && text) {
+          this.activityListeners.forEach((l) => l(false));
+          this.messageListeners.forEach((l) => l({
+            id: getString(message.id) || getString(payload.runId) || nextId(),
+            role: 'assistant',
+            content: text,
+            timestamp: Date.now(),
+          }));
         }
         break;
       }
@@ -551,15 +607,21 @@ export class GatewayClient {
     this.connectionListeners.forEach((l) => l(state));
   }
 
-  private scheduleReconnect(): void {
+  private notifyError(error: string): void {
+    this.errorListeners.forEach((l) => l(error));
+  }
+
+  private scheduleReconnect(retryAfterMs?: number): void {
     if (this.disposed) return;
     this.setState('reconnecting');
     this.reconnectAttempts++;
 
-    const delay = Math.min(
-      RECONNECT_BASE_MS * Math.pow(2, this.reconnectAttempts - 1),
-      RECONNECT_MAX_MS,
-    );
+    const delay = typeof retryAfterMs === 'number'
+      ? Math.min(Math.max(retryAfterMs, RECONNECT_BASE_MS), RECONNECT_MAX_MS)
+      : Math.min(
+          RECONNECT_BASE_MS * Math.pow(2, this.reconnectAttempts - 1),
+          RECONNECT_MAX_MS,
+        );
 
     this.reconnectTimer = setTimeout(() => {
       this.connect().catch(() => {});
@@ -577,6 +639,7 @@ export class GatewayClient {
     this.stopTickWatch();
     this.tickWatchTimer = setTimeout(() => {
       console.warn('[Gateway] Tick timeout — no tick received in', 2 * this.tickIntervalMs, 'ms, reconnecting...');
+      this.notifyError('Gateway keepalive timed out');
       this.ws?.close(4000, 'tick timeout');
     }, 2 * this.tickIntervalMs);
   }
@@ -594,4 +657,39 @@ export class GatewayClient {
       this.connectTimeoutTimer = null;
     }
   }
+}
+
+function getString(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function extractMessageText(message?: Record<string, unknown>): string {
+  if (!message) return '';
+
+  const directText = getString(message.text) || getString(message.content);
+  if (directText) return directText;
+
+  const content = message.content;
+  if (!Array.isArray(content)) return '';
+
+  return content
+    .map((part) => {
+      if (typeof part === 'string') return part;
+      if (!part || typeof part !== 'object') return '';
+      const record = part as Record<string, unknown>;
+      return getString(record.text) || getString(record.content);
+    })
+    .filter(Boolean)
+    .join('');
+}
+
+function formatGatewayError(code: string | undefined, message: string): string {
+  const normalized = `${code || ''} ${message}`.toLowerCase();
+  if (normalized.includes('pair') || normalized.includes('approve') || normalized.includes('device')) {
+    return 'Device approval required in OpenClaw.';
+  }
+  if (normalized.includes('token') || normalized.includes('auth') || normalized.includes('unauthorized')) {
+    return 'Gateway authentication failed. Check your token.';
+  }
+  return message;
 }

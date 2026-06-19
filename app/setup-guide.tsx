@@ -20,7 +20,7 @@ const steps = [
   },
   {
     icon: 'link-outline' as const,
-    title: 'Connect in iClawd',
+    title: 'Connect in ClawVoice',
     desc: 'Paste your gateway URL and token to start talking to your agent.',
     action: 'I have my credentials',
     route: '/connect',
@@ -65,7 +65,7 @@ export default function SetupGuideScreen() {
       <View style={styles.altSection}>
         <Text style={styles.altTitle}>Already have a VPS?</Text>
         <Text style={styles.altDesc}>
-          Install OpenClaw on any server and point iClawd to it. Works with Tailscale, Cloudflare Tunnel, or direct IP.
+          Install OpenClaw on any server and point ClawVoice to it. Works with Tailscale, Cloudflare Tunnel, or direct IP.
         </Text>
         <Pressable onPress={() => Linking.openURL('https://github.com/openclaw/openclaw')}>
           <Text style={styles.altLink}>View OpenClaw on GitHub</Text>

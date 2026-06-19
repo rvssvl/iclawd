@@ -189,7 +189,7 @@ export function VoiceOrb({ state, transcript, onTap, disabled, connecting, busy,
 
       {/* Hint label */}
       {statusLabel ? (
-        <Text style={styles.hintLabel}>{statusLabel}</Text>
+        <Text style={styles.hintLabel} numberOfLines={3}>{statusLabel}</Text>
       ) : state === 'speaking' ? (
         <Text style={styles.hintLabel}>Playing audio. Tap to stop.</Text>
       ) : state === 'idle' && !connecting && !disabled ? (
@@ -249,6 +249,9 @@ const styles = StyleSheet.create({
     fontSize: fontSize.sm,
     color: colors.textMuted,
     marginTop: -spacing.xs,
+    maxWidth: 340,
+    textAlign: 'center',
+    lineHeight: 20,
   },
   listeningLabel: {
     color: colors.voiceListening,

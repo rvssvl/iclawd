@@ -1,12 +1,15 @@
 import { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, Pressable, Alert, ScrollView, TextInput, Platform, Switch, Linking, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, Pressable, Alert, ScrollView, TextInput, Platform, Switch, Linking, ActivityIndicator, ActionSheetIOS } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Updates from 'expo-updates';
-import * as SecureStore from 'expo-secure-store';
+import Constants from 'expo-constants';
+import * as SecureStore from '@/services/SafeSecureStore';
 import { colors, spacing, fontSize, borderRadius } from '@/constants/theme';
 import { getGatewayConfig, deleteGatewayConfig } from '@/services/SecureStorage';
 import { addSiriShortcut } from '@/services/SiriService';
+import { getAnalyticsDiagnostics, isAnalyticsEnabled, sendAnalyticsTestEvent, setAnalyticsEnabled, track } from '@/services/AnalyticsService';
+import type { AnalyticsDiagnostics } from '@/services/AnalyticsService';
 import type { GatewayConfig } from '@/types/gateway';
 import {
   DEFAULT_ELEVENLABS_TTS_SIMILARITY,
@@ -23,9 +26,17 @@ import {
   setElevenLabsSttEnabled,
   saveElevenLabsTtsSetting,
 } from '@/services/ElevenLabsConfig';
+import {
+  DEFAULT_VOICE_LANGUAGE,
+  getVoiceLanguage,
+  setVoiceLanguage,
+  VOICE_LANGUAGE_OPTIONS,
+} from '@/services/VoiceLanguageConfig';
+import type { VoiceLanguageOption } from '@/services/VoiceLanguageConfig';
 
 const KEY_AUTO_PRONOUNCE = 'iclawd_auto_pronounce';
 const KEY_NOTIFICATIONS = 'iclawd_notifications';
+const OTA_CHANNEL = 'production';
 
 async function getElevenLabsKey(): Promise<string | null> {
   return SecureStore.getItemAsync(ELEVENLABS_KEY);
@@ -48,11 +59,15 @@ export default function SettingsScreen() {
   const [autoPronounce, setAutoPronounce] = useState(true);
   const [notifications, setNotifications] = useState(true);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [usageAnalytics, setUsageAnalytics] = useState(true);
+  const [analyticsDiagnostics, setAnalyticsDiagnostics] = useState<AnalyticsDiagnostics | null>(null);
+  const [sendingAnalyticsTest, setSendingAnalyticsTest] = useState(false);
   const [ttsVoiceId, setTtsVoiceId] = useState(DEFAULT_ELEVENLABS_VOICE_ID);
   const [ttsSpeed, setTtsSpeed] = useState(String(DEFAULT_ELEVENLABS_TTS_SPEED));
   const [ttsStability, setTtsStability] = useState(String(DEFAULT_ELEVENLABS_TTS_STABILITY));
   const [ttsSimilarity, setTtsSimilarity] = useState(String(DEFAULT_ELEVENLABS_TTS_SIMILARITY));
   const [elevenLabsStt, setElevenLabsStt] = useState(false);
+  const [voiceLanguage, setVoiceLanguageState] = useState<VoiceLanguageOption>(DEFAULT_VOICE_LANGUAGE);
 
   useEffect(() => {
     getGatewayConfig().then(setConfig);
@@ -63,9 +78,13 @@ export default function SettingsScreen() {
       setTtsStability(String(settings.stability));
       setTtsSimilarity(String(settings.similarityBoost));
     });
+    getVoiceLanguage().then(setVoiceLanguageState);
     SecureStore.getItemAsync(KEY_AUTO_PRONOUNCE).then((v) => setAutoPronounce(v !== 'false'));
     SecureStore.getItemAsync(KEY_NOTIFICATIONS).then((v) => setNotifications(v !== 'false'));
     isElevenLabsSttEnabled().then(setElevenLabsStt);
+    isAnalyticsEnabled().then(setUsageAnalytics);
+    getAnalyticsDiagnostics().then(setAnalyticsDiagnostics);
+    track('settings_opened', { screen: 'settings' });
   }, []);
 
   function handleDisconnect() {
@@ -94,6 +113,9 @@ export default function SettingsScreen() {
   async function handleSaveKey() {
     await saveElevenLabsKey(keyInput);
     setElevenLabsKey(keyInput.trim());
+    if (keyInput.trim()) {
+      track('elevenlabs_key_added', { screen: 'settings' });
+    }
     if (!keyInput.trim()) {
       await setElevenLabsSttEnabled(false);
       setElevenLabsStt(false);
@@ -135,14 +157,76 @@ export default function SettingsScreen() {
   async function toggleElevenLabsStt(value: boolean) {
     setElevenLabsStt(value);
     await setElevenLabsSttEnabled(value);
+    track('elevenlabs_stt_enabled', { screen: 'settings', enabled: value });
+  }
+
+  function handleSelectVoiceLanguage() {
+    if (Platform.OS === 'ios') {
+      const options = [...VOICE_LANGUAGE_OPTIONS.map((option) => option.label), 'Cancel'];
+      const cancelButtonIndex = options.length - 1;
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          options,
+          cancelButtonIndex,
+          userInterfaceStyle: 'dark',
+        },
+        (buttonIndex) => {
+          if (buttonIndex === cancelButtonIndex) return;
+          const next = VOICE_LANGUAGE_OPTIONS[buttonIndex];
+          if (!next) return;
+          setVoiceLanguage(next.locale).then(setVoiceLanguageState);
+        },
+      );
+      return;
+    }
+
+    const currentIndex = VOICE_LANGUAGE_OPTIONS.findIndex((option) => option.locale === voiceLanguage.locale);
+    const next = VOICE_LANGUAGE_OPTIONS[(currentIndex + 1) % VOICE_LANGUAGE_OPTIONS.length] || DEFAULT_VOICE_LANGUAGE;
+    setVoiceLanguage(next.locale).then(setVoiceLanguageState);
+  }
+
+  async function toggleUsageAnalytics(value: boolean) {
+    setUsageAnalytics(value);
+    await setAnalyticsEnabled(value);
+    if (value) {
+      await track('settings_opened', { screen: 'settings' });
+    }
+    setAnalyticsDiagnostics(await getAnalyticsDiagnostics());
+  }
+
+  async function handleSendAnalyticsTest() {
+    if (!usageAnalytics) {
+      Alert.alert('Analytics is off', 'Turn on Usage Analytics first, then send a test event.');
+      return;
+    }
+
+    setSendingAnalyticsTest(true);
+    try {
+      const nextDiagnostics = await sendAnalyticsTestEvent();
+      setAnalyticsDiagnostics(nextDiagnostics);
+      if (nextDiagnostics.lastEventStatus === 'sent') {
+        Alert.alert('Test event sent', 'Open Firebase Realtime or DebugView and look for analytics_test_sent.');
+      } else if (nextDiagnostics.lastEventStatus === 'module_missing') {
+        Alert.alert('Firebase not loaded', 'The analytics native module is not available in this installed build.');
+      } else {
+        Alert.alert('Analytics test failed', nextDiagnostics.lastEventError || 'The app could not send the test event.');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not send analytics test event.';
+      Alert.alert('Analytics test failed', message);
+    } finally {
+      setSendingAnalyticsTest(false);
+    }
   }
 
   async function saveTtsSetting(key: string, value: string, setValue: (value: string) => void) {
     await saveElevenLabsTtsSetting(key, value);
     setValue(value.trim());
+    track('elevenlabs_tts_setting_changed', { screen: 'settings', setting: key });
   }
 
   async function handleCheckForUpdates() {
+    track('ota_check_tapped', { screen: 'settings' });
     if (__DEV__) {
       Alert.alert('Updates unavailable', 'OTA updates are disabled in development builds.');
       return;
@@ -150,6 +234,7 @@ export default function SettingsScreen() {
 
     setCheckingUpdate(true);
     try {
+      prepareUpdateRequestHeaders();
       const update = await Updates.checkForUpdateAsync();
       if (!update.isAvailable) {
         Alert.alert('Up to date', 'You are already running the latest available update.');
@@ -167,7 +252,7 @@ export default function SettingsScreen() {
         },
       ]);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Could not check for updates.';
+      const message = getUpdateCheckErrorMessage(error);
       Alert.alert('Update check failed', message);
     } finally {
       setCheckingUpdate(false);
@@ -182,6 +267,8 @@ export default function SettingsScreen() {
   const bundleDate = Updates.createdAt
     ? Updates.createdAt.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
     : null;
+  const analyticsLastEventLabel = formatAnalyticsLastEvent(analyticsDiagnostics);
+  const appVersion = Constants.expoConfig?.version || 'Unavailable';
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
@@ -225,6 +312,14 @@ export default function SettingsScreen() {
           <Text style={styles.rowLabel}>Speech-to-Text</Text>
           <Text style={styles.rowValue}>{elevenLabsKey && elevenLabsStt ? 'ElevenLabs' : 'System'}</Text>
         </View>
+        <View style={styles.divider} />
+        <Pressable style={styles.row} onPress={handleSelectVoiceLanguage}>
+          <View style={styles.rowText}>
+            <Text style={styles.rowLabel}>Language</Text>
+            <Text style={styles.rowDescription}>Used for speech recognition, TTS, and gateway locale.</Text>
+          </View>
+          <Text style={styles.rowValue}>{voiceLanguage.label}</Text>
+        </Pressable>
         <View style={styles.divider} />
         {editingKey ? (
           <View style={styles.keyEditContainer}>
@@ -377,12 +472,71 @@ export default function SettingsScreen() {
         </View>
       </View>
 
+      {/* Privacy Section */}
+      <Text style={styles.sectionTitle}>Privacy</Text>
+      <View style={styles.card}>
+        <View style={styles.row}>
+          <View style={styles.rowText}>
+            <Text style={styles.rowLabel}>Usage Analytics</Text>
+            <Text style={styles.rowDescription}>
+              Helps improve reliability and onboarding. No prompts, transcripts, messages, gateway URLs, or tokens are collected.
+            </Text>
+          </View>
+          <Switch
+            value={usageAnalytics}
+            onValueChange={toggleUsageAnalytics}
+            trackColor={{ false: colors.border, true: colors.primary }}
+          />
+        </View>
+        <View style={styles.divider} />
+        <View style={styles.row}>
+          <Text style={styles.rowLabel}>Firebase Module</Text>
+          <Text style={styles.rowValue}>
+            {analyticsDiagnostics ? (analyticsDiagnostics.moduleLoaded ? 'Loaded' : 'Missing') : 'Checking'}
+          </Text>
+        </View>
+        <View style={styles.divider} />
+        <View style={styles.row}>
+          <Text style={styles.rowLabel}>Firebase Project</Text>
+          <Text style={styles.rowValue} numberOfLines={1}>
+            {analyticsDiagnostics?.projectId || 'Unknown'}
+          </Text>
+        </View>
+        <View style={styles.divider} />
+        <View style={styles.row}>
+          <Text style={styles.rowLabel}>Firebase App</Text>
+          <Text style={styles.rowValue} numberOfLines={1}>
+            {analyticsDiagnostics?.appId || 'Unknown'}
+          </Text>
+        </View>
+        <View style={styles.divider} />
+        <View style={styles.row}>
+          <Text style={styles.rowLabel}>Last Analytics Event</Text>
+          <Text style={styles.rowValue} numberOfLines={2}>
+            {analyticsLastEventLabel}
+          </Text>
+        </View>
+        <View style={styles.divider} />
+        <Pressable
+          style={styles.row}
+          onPress={handleSendAnalyticsTest}
+          disabled={sendingAnalyticsTest}
+        >
+          <Text style={styles.rowLabel}>Send Test Event</Text>
+          {sendingAnalyticsTest ? (
+            <ActivityIndicator size="small" color={colors.primaryLight} />
+          ) : (
+            <Ionicons name="analytics-outline" size={18} color={colors.primary} />
+          )}
+        </Pressable>
+      </View>
+
       {/* About Section */}
       <Text style={styles.sectionTitle}>About</Text>
       <View style={styles.card}>
         <View style={styles.row}>
           <Text style={styles.rowLabel}>Version</Text>
-          <Text style={styles.rowValue}>2.0.2</Text>
+          <Text style={styles.rowValue}>{appVersion}</Text>
         </View>
         <View style={styles.divider} />
         <View style={styles.row}>
@@ -390,6 +544,11 @@ export default function SettingsScreen() {
           <Text style={styles.rowValue} numberOfLines={1}>
             {bundleDate ? `${bundleLabel} · ${bundleDate}` : bundleLabel}
           </Text>
+        </View>
+        <View style={styles.divider} />
+        <View style={styles.row}>
+          <Text style={styles.rowLabel}>Update Channel</Text>
+          <Text style={styles.rowValue}>{Updates.channel || 'Missing'}</Text>
         </View>
         <View style={styles.divider} />
         <Pressable style={styles.row} onPress={handleCheckForUpdates} disabled={checkingUpdate}>
@@ -413,6 +572,40 @@ export default function SettingsScreen() {
       </View>
     </ScrollView>
   );
+}
+
+function formatAnalyticsLastEvent(diagnostics: AnalyticsDiagnostics | null): string {
+  if (!diagnostics?.lastEventStatus) return 'No event yet';
+
+  const status = diagnostics.lastEventStatus.replace(/_/g, ' ');
+  if (!diagnostics.lastEventAt) return status;
+
+  const date = new Date(diagnostics.lastEventAt);
+  if (Number.isNaN(date.getTime())) return status;
+
+  const time = date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  return `${status} · ${time}`;
+}
+
+function prepareUpdateRequestHeaders() {
+  if (Updates.channel) return;
+
+  try {
+    Updates.setUpdateRequestHeadersOverride?.({ 'expo-channel-name': OTA_CHANNEL });
+  } catch {
+    // Older or strictly configured binaries cannot override update headers at runtime.
+  }
+}
+
+function getUpdateCheckErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error || '');
+  const normalized = message.toLowerCase();
+
+  if (normalized.includes('expo-channel-name') || normalized.includes('channel-name')) {
+    return 'This installed build is missing the production OTA channel. Install the next App Store/TestFlight build once, then manual update checks will work normally.';
+  }
+
+  return message || 'Could not check for updates.';
 }
 
 const styles = StyleSheet.create({
@@ -461,6 +654,10 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     marginTop: 2,
     maxWidth: 220,
+  },
+  rowText: {
+    flex: 1,
+    paddingRight: spacing.md,
   },
   settingInputRow: {
     flexDirection: 'row',

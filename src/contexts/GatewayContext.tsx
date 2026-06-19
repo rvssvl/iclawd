@@ -1,10 +1,11 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import { AppState } from 'react-native';
-import * as SecureStore from 'expo-secure-store';
-import * as Notifications from 'expo-notifications';
+import * as SecureStore from '@/services/SafeSecureStore';
+import type * as ExpoNotifications from 'expo-notifications';
 import { GatewayClient } from '@/services/GatewayClient';
 import { getGatewayConfig } from '@/services/SecureStorage';
 import { voiceEngine } from '@/services/VoiceEngine';
+import { categorizeError, track, trackOnce } from '@/services/AnalyticsService';
 import type { ConnectionState, ChatMessage, GatewayConfig } from '@/types/gateway';
 import { createLocalMessageId } from '@/utils/messageIds';
 
@@ -12,15 +13,23 @@ const KEY_AUTO_PRONOUNCE = 'iclawd_auto_pronounce';
 const KEY_NOTIFICATIONS = 'iclawd_notifications';
 
 // Suppress notification banners when app is in foreground — only show when backgrounded/closed
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: false,
-    shouldPlaySound: false,
-    shouldSetBadge: false,
-    shouldShowBanner: false,
-    shouldShowList: false,
-  }),
-});
+function getNotifications(): typeof ExpoNotifications | null {
+  if (__DEV__) return null;
+  return require('expo-notifications') as typeof ExpoNotifications;
+}
+
+const initialNotifications = getNotifications();
+if (initialNotifications) {
+  initialNotifications.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowAlert: false,
+      shouldPlaySound: false,
+      shouldSetBadge: false,
+      shouldShowBanner: false,
+      shouldShowList: false,
+    }),
+  });
+}
 
 interface GatewayContextValue {
   connectionState: ConnectionState;
@@ -28,6 +37,7 @@ interface GatewayContextValue {
   streamingText: string;
   streamingId: string | null;
   awaitingResponse: boolean;
+  connectionError: string | null;
   sendMessage: (text: string) => Promise<void>;
   stopChat: () => Promise<void>;
   reconnect: () => Promise<void>;
@@ -42,6 +52,7 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
   const [streamingText, setStreamingText] = useState('');
   const [streamingId, setStreamingId] = useState<string | null>(null);
   const [awaitingResponse, setAwaitingResponse] = useState(false);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   const stoppedResponseRef = useRef(false);
 
   // Settings refs (read from SecureStore, updated by settings screen)
@@ -68,11 +79,19 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
 
   function connectWithConfig(config: GatewayConfig) {
     clientRef.current?.disconnect();
+    setConnectionError(null);
 
     const client = new GatewayClient(config);
     clientRef.current = client;
 
-    client.onConnectionChange(setConnectionState);
+    client.onConnectionChange((state) => {
+      setConnectionState(state);
+      if (state === 'connected' || state === 'connecting') {
+        setConnectionError(null);
+      }
+    });
+
+    client.onError(setConnectionError);
 
     client.onMessage((msg) => {
       if (stoppedResponseRef.current) {
@@ -93,15 +112,21 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
       // Auto-pronounce and notify for assistant messages
       if (msg.role === 'assistant' && msg.id !== lastSpokenMsgIdRef.current) {
         lastSpokenMsgIdRef.current = msg.id;
+        trackOnce('first_agent_response_received');
 
         if (autoPronounceRef.current) {
           voiceEngine.speak(msg.content).catch((error) => {
+            track('voice_tts_failed', {
+              provider: 'unknown',
+              error_category: categorizeError(error),
+            });
             console.warn('[Voice] Auto-pronounce failed:', error instanceof Error ? error.message : error);
           });
         }
 
-        if (notificationsRef.current && AppState.currentState !== 'active') {
-          Notifications.scheduleNotificationAsync({
+        const notifications = getNotifications();
+        if (notifications && notificationsRef.current && AppState.currentState !== 'active') {
+          notifications.scheduleNotificationAsync({
             content: {
               title: 'Agent',
               body: msg.content.length > 200 ? msg.content.slice(0, 200) + '...' : msg.content,
@@ -132,7 +157,10 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
     });
 
     client.connect().catch((err) => {
-      console.warn('[Gateway] Connect failed:', err.message);
+      const message = err instanceof Error ? err.message : 'Could not connect to gateway';
+      track('connect_failed', { error_category: categorizeError(message) });
+      setConnectionError(message);
+      console.warn('[Gateway] Connect failed:', message);
     });
   }
 
@@ -173,6 +201,7 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
 
     try {
       await clientRef.current.sendChat(text);
+      trackOnce('first_chat_sent');
       setAwaitingResponse(true);
     } catch (error) {
       setAwaitingResponse(false);
@@ -201,6 +230,9 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
     const config = await getGatewayConfig();
     if (config) {
       connectWithConfig(config);
+    } else {
+      setConnectionState('disconnected');
+      setConnectionError('No gateway is configured');
     }
   }, []);
 
@@ -210,6 +242,7 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
     streamingText,
     streamingId,
     awaitingResponse,
+    connectionError,
     sendMessage,
     stopChat,
     reconnect,

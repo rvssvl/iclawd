@@ -17,6 +17,7 @@ import { colors, spacing, fontSize, borderRadius } from '@/constants/theme';
 import { saveGatewayConfig } from '@/services/SecureStorage';
 import { GatewayClient } from '@/services/GatewayClient';
 import { donateSiriShortcut } from '@/services/SiriService';
+import { categorizeError, getGatewayUrlType, track } from '@/services/AnalyticsService';
 
 export default function ConnectScreen() {
   const router = useRouter();
@@ -40,6 +41,11 @@ export default function ConnectScreen() {
     const wsUrl = normalizeGatewayUrl(trimmedUrl);
 
     if (Platform.OS !== 'web' && isLocalhostUrl(wsUrl)) {
+      track('connect_failed', {
+        screen: 'connect',
+        url_type: getGatewayUrlType(wsUrl),
+        error_category: 'network',
+      });
       Alert.alert(
         'Use a reachable gateway URL',
         '127.0.0.1 and localhost point to this phone, not your OpenClaw computer. Use your computer LAN IP, Tailscale IP, or PrimeClaws URL instead, such as ws://100.x.x.x:18789.',
@@ -48,10 +54,19 @@ export default function ConnectScreen() {
     }
 
     setConnecting(true);
+    track('connect_attempted', {
+      screen: 'connect',
+      url_type: getGatewayUrlType(wsUrl),
+    });
     try {
       // Validate the authenticated OpenClaw handshake before saving.
       const testResult = await testConnection(wsUrl, trimmedToken);
       if (!testResult.ok) {
+        track('connect_failed', {
+          screen: 'connect',
+          url_type: getGatewayUrlType(wsUrl),
+          error_category: categorizeError(testResult.error),
+        });
         Alert.alert('Connection Failed', testResult.error || 'Could not reach the gateway.');
         setConnecting(false);
         return;
@@ -64,12 +79,22 @@ export default function ConnectScreen() {
         name: 'My Gateway',
       });
 
+      track('connect_succeeded', {
+        screen: 'connect',
+        url_type: getGatewayUrlType(wsUrl),
+      });
+
       // Donate Siri shortcut on first successful connection
       donateSiriShortcut().catch(() => {});
 
       // Navigate to voice chat (primary interface)
       router.replace('/voice');
     } catch (e) {
+      track('connect_failed', {
+        screen: 'connect',
+        url_type: getGatewayUrlType(wsUrl),
+        error_category: categorizeError(e),
+      });
       Alert.alert('Error', 'Failed to connect. Check your URL and try again.');
       setConnecting(false);
     }

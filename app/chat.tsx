@@ -16,6 +16,7 @@ import * as Haptics from 'expo-haptics';
 import { colors, spacing, fontSize, borderRadius } from '@/constants/theme';
 import { useGatewayContext } from '@/contexts/GatewayContext';
 import { useVoice } from '@/hooks/useVoice';
+import { track, trackOnce } from '@/services/AnalyticsService';
 import { ChatBubble } from '@/components/ChatBubble';
 import { TypingIndicator } from '@/components/ui/TypingIndicator';
 import type { ChatMessage } from '@/types/gateway';
@@ -28,6 +29,7 @@ export default function ChatScreen() {
     streamingText,
     streamingId,
     awaitingResponse,
+    connectionError,
     sendMessage,
     reconnect,
   } = useGatewayContext();
@@ -40,6 +42,7 @@ export default function ChatScreen() {
   const insets = useSafeAreaInsets();
   const {
     voiceState,
+    inputProvider,
     transcript,
     startListening,
     stopListening,
@@ -48,12 +51,15 @@ export default function ChatScreen() {
     setOnFinalTranscript,
   } = useVoice();
 
+  const isConnected = connectionState === 'connected';
+  const hasConnectionProblem = connectionState === 'error' || connectionState === 'disconnected';
+
   // Auto-connect if gateway not yet connected
   useEffect(() => {
     if (connectionState === 'disconnected') {
       reconnect();
     }
-  }, []);
+  }, [connectionState, reconnect]);
 
   // Build display messages including streaming
   const displayMessages: ChatMessage[] = [
@@ -78,7 +84,7 @@ export default function ChatScreen() {
 
   async function handleSend() {
     const text = input.trim();
-    if (!text || connectionState !== 'connected') return;
+    if (!text || !isConnected) return;
     setInput('');
     await sendMessage(text);
   }
@@ -117,7 +123,7 @@ export default function ChatScreen() {
   }, [dictating, transcript]);
 
   async function toggleDictation() {
-    if (connectionState !== 'connected') return;
+    if (!isConnected) return;
 
     if (voiceState === 'speaking' || voiceState === 'preparingAudio') {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -134,6 +140,8 @@ export default function ChatScreen() {
     }
 
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+    track('voice_started', { screen: 'chat', provider: inputProvider });
+    trackOnce('first_voice_started', { screen: 'chat', provider: inputProvider });
     dictationBaseRef.current = input;
     setDictating(true);
     inputRef.current?.blur();
@@ -150,16 +158,16 @@ export default function ChatScreen() {
       <Stack.Screen
         options={{
           headerLeft: () => (
-            <Pressable onPress={openVoiceMode} style={{ padding: spacing.xs }}>
-              <Ionicons name="headset-outline" size={22} color={colors.textSecondary} />
+            <Pressable onPress={openVoiceMode} style={styles.headerIconButton}>
+              <Ionicons name="headset-outline" size={22} color={colors.textSecondary} style={styles.headerIcon} />
             </Pressable>
           ),
           headerRight: () => (
-            <Pressable onPress={() => router.push('/settings')} style={{ padding: spacing.xs }}>
-              <Ionicons name="settings-outline" size={22} color={colors.textSecondary} />
+            <Pressable onPress={() => router.push('/settings')} style={styles.headerIconButton}>
+              <Ionicons name="settings-outline" size={22} color={colors.textSecondary} style={styles.headerIcon} />
             </Pressable>
           ),
-          headerTitle: 'iClawd',
+          headerTitle: 'ClawVoice',
         }}
       />
 
@@ -175,13 +183,21 @@ export default function ChatScreen() {
             <Text style={styles.emptyTitle}>
               {connectionState === 'connected'
                 ? 'Start a conversation'
-                : 'Connecting to your agent...'}
+                : hasConnectionProblem
+                  ? 'Could not connect'
+                  : 'Connecting to your agent...'}
             </Text>
             <Text style={styles.emptySubtitle}>
               {connectionState === 'connected'
                 ? 'Type a message or use voice mode'
-                : 'Make sure your gateway is running'}
+                : connectionError || 'Make sure your gateway is running'}
             </Text>
+            {hasConnectionProblem && (
+              <Pressable style={styles.retryButton} onPress={reconnect}>
+                <Ionicons name="refresh" size={16} color={colors.text} />
+                <Text style={styles.retryButtonText}>Reconnect</Text>
+              </Pressable>
+            )}
           </View>
         ) : (
           <FlatList
@@ -197,6 +213,16 @@ export default function ChatScreen() {
             contentContainerStyle={styles.messageList}
             showsVerticalScrollIndicator={false}
           />
+        )}
+
+        {!isConnected && connectionError && displayMessages.length > 0 && (
+          <View style={styles.connectionBanner}>
+            <Ionicons name="warning-outline" size={16} color={colors.warning} />
+            <Text style={styles.connectionBannerText} numberOfLines={2}>{connectionError}</Text>
+            <Pressable onPress={reconnect} hitSlop={8}>
+              <Ionicons name="refresh" size={18} color={colors.textSecondary} />
+            </Pressable>
+          </View>
         )}
 
         {/* Input bar */}
@@ -231,7 +257,7 @@ export default function ChatScreen() {
             placeholderTextColor={colors.textMuted}
             multiline
             maxLength={4000}
-            editable={connectionState === 'connected' && !dictating && voiceState !== 'thinking'}
+            editable={isConnected && !dictating && voiceState !== 'thinking'}
           />
 
           {voiceState === 'speaking' || voiceState === 'preparingAudio' ? (
@@ -243,9 +269,9 @@ export default function ChatScreen() {
             </Pressable>
           ) : (
             <Pressable
-              style={[styles.sendButton, (!input.trim() || connectionState !== 'connected') && styles.sendButtonDisabled]}
+              style={[styles.sendButton, (!input.trim() || !isConnected) && styles.sendButtonDisabled]}
               onPress={handleSend}
-              disabled={!input.trim() || connectionState !== 'connected'}
+              disabled={!input.trim() || !isConnected}
             >
               <Ionicons name="arrow-up" size={18} color={colors.text} />
             </Pressable>
@@ -260,6 +286,19 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.background,
+  },
+  headerIconButton: {
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  headerIcon: {
+    width: 22,
+    height: 22,
+    lineHeight: 22,
+    textAlign: 'center',
+    transform: [{ translateY: -2 }],
   },
   messageList: {
     paddingVertical: spacing.md,
@@ -286,6 +325,39 @@ const styles = StyleSheet.create({
     fontSize: fontSize.sm,
     color: colors.textMuted,
     textAlign: 'center',
+  },
+  retryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.full,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    marginTop: spacing.sm,
+  },
+  retryButtonText: {
+    fontSize: fontSize.sm,
+    fontWeight: '600',
+    color: colors.text,
+  },
+  connectionBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginHorizontal: spacing.sm,
+    marginBottom: spacing.xs,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: borderRadius.md,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  connectionBannerText: {
+    flex: 1,
+    fontSize: fontSize.sm,
+    color: colors.textSecondary,
   },
   inputBar: {
     flexDirection: 'row',
