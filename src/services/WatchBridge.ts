@@ -1,4 +1,8 @@
 import { NativeEventEmitter, NativeModules, Platform } from 'react-native';
+import * as SecureStore from '@/services/SafeSecureStore';
+import { ELEVENLABS_KEY, isElevenLabsSttEnabled } from '@/services/ElevenLabsConfig';
+import { getGatewayConfig } from '@/services/SecureStorage';
+import { getVoiceLanguage } from '@/services/VoiceLanguageConfig';
 
 export type WatchCommandAction = 'startVoice' | 'stopAudio' | 'pauseVoice' | 'requestStatus';
 
@@ -13,8 +17,17 @@ export interface WatchStatus {
   subtitle?: string;
 }
 
+export interface WatchConfiguration {
+  gatewayUrl: string;
+  gatewayToken: string;
+  elevenLabsKey?: string;
+  languageCode: string;
+  locale: string;
+}
+
 type NativeWatchBridge = {
   setStatus?: (status: WatchStatus) => void;
+  setConfiguration?: (configuration: WatchConfiguration | { clear: true }) => void;
 };
 
 const nativeBridge = Platform.OS === 'ios'
@@ -32,4 +45,30 @@ export function addWatchCommandListener(listener: (command: WatchCommand) => voi
 
 export function setWatchStatus(status: WatchStatus) {
   nativeBridge?.setStatus?.(status);
+}
+
+export function setWatchConfiguration(configuration: WatchConfiguration) {
+  nativeBridge?.setConfiguration?.(configuration);
+}
+
+export async function syncWatchConfiguration(): Promise<boolean> {
+  const [configuration, sttEnabled, elevenLabsKey, language] = await Promise.all([
+    getGatewayConfig(),
+    isElevenLabsSttEnabled(),
+    SecureStore.getItemAsync(ELEVENLABS_KEY),
+    getVoiceLanguage(),
+  ]);
+  if (!configuration) {
+    nativeBridge?.setConfiguration?.({ clear: true });
+    return false;
+  }
+
+  setWatchConfiguration({
+    gatewayUrl: configuration.url,
+    gatewayToken: configuration.token,
+    ...(sttEnabled && elevenLabsKey?.trim() ? { elevenLabsKey: elevenLabsKey.trim() } : {}),
+    languageCode: language.languageCode,
+    locale: language.locale,
+  });
+  return true;
 }

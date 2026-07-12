@@ -4,10 +4,21 @@ import * as SecureStore from '@/services/SafeSecureStore';
 import type * as ExpoNotifications from 'expo-notifications';
 import { GatewayClient } from '@/services/GatewayClient';
 import { getGatewayConfig } from '@/services/SecureStorage';
+import {
+  gatewayProfileToConfig,
+  getActiveGatewayProfile,
+  markGatewayProfileConnected,
+} from '@/services/GatewayProfiles';
+import {
+  appendConversationMessage,
+  loadConversationHistory,
+  saveConversationHistory,
+} from '@/services/ConversationHistory';
 import { voiceEngine } from '@/services/VoiceEngine';
 import { categorizeError, track, trackOnce } from '@/services/AnalyticsService';
 import type { ConnectionState, ChatMessage, GatewayConfig } from '@/types/gateway';
 import { createLocalMessageId } from '@/utils/messageIds';
+import { prepareAssistantSpeechText, rememberAssistantSpeech } from '@/utils/assistantSpeechText';
 
 const KEY_AUTO_PRONOUNCE = 'iclawd_auto_pronounce';
 const KEY_NOTIFICATIONS = 'iclawd_notifications';
@@ -41,6 +52,7 @@ interface GatewayContextValue {
   sendMessage: (text: string) => Promise<void>;
   stopChat: () => Promise<void>;
   reconnect: () => Promise<void>;
+  activeGatewayId: string | null;
 }
 
 const GatewayContext = createContext<GatewayContextValue | null>(null);
@@ -53,7 +65,9 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
   const [streamingId, setStreamingId] = useState<string | null>(null);
   const [awaitingResponse, setAwaitingResponse] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [activeGatewayId, setActiveGatewayId] = useState<string | null>(null);
   const stoppedResponseRef = useRef(false);
+  const activeGatewayIdRef = useRef<string | null>(null);
 
   // Settings refs (read from SecureStore, updated by settings screen)
   const autoPronounceRef = useRef(true);
@@ -77,7 +91,23 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
     return () => sub.remove();
   }, []);
 
-  function connectWithConfig(config: GatewayConfig) {
+  async function connectWithActiveProfile() {
+    const profile = await getActiveGatewayProfile();
+    if (!profile) {
+      setActiveGatewayId(null);
+      activeGatewayIdRef.current = null;
+      setMessages([]);
+      setConnectionState('disconnected');
+      return;
+    }
+
+    setActiveGatewayId(profile.id);
+    activeGatewayIdRef.current = profile.id;
+    setMessages(await loadConversationHistory(profile.id));
+    connectWithConfig(gatewayProfileToConfig(profile), profile.id);
+  }
+
+  function connectWithConfig(config: GatewayConfig, profileId?: string) {
     clientRef.current?.disconnect();
     setConnectionError(null);
 
@@ -88,6 +118,9 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
       setConnectionState(state);
       if (state === 'connected' || state === 'connecting') {
         setConnectionError(null);
+      }
+      if (state === 'connected' && profileId) {
+        markGatewayProfileConnected(profileId).catch(() => {});
       }
     });
 
@@ -106,7 +139,11 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
       setStreamingId(null);
       setMessages((prev) => {
         if (prev.some((m) => m.id === msg.id)) return prev;
-        return [...prev, msg];
+        const next = [...prev, msg];
+        if (activeGatewayIdRef.current) {
+          saveConversationHistory(activeGatewayIdRef.current, next).catch(() => {});
+        }
+        return next;
       });
 
       // Auto-pronounce and notify for assistant messages
@@ -115,13 +152,20 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
         trackOnce('first_agent_response_received');
 
         if (autoPronounceRef.current) {
-          voiceEngine.speak(msg.content).catch((error) => {
-            track('voice_tts_failed', {
-              provider: 'unknown',
-              error_category: categorizeError(error),
-            });
-            console.warn('[Voice] Auto-pronounce failed:', error instanceof Error ? error.message : error);
-          });
+          const speechText = prepareAssistantSpeechText(msg.content);
+          if (speechText) {
+            voiceEngine.speak(speechText)
+              .then(() => {
+                rememberAssistantSpeech(speechText);
+              })
+              .catch((error) => {
+                track('voice_tts_failed', {
+                  provider: 'unknown',
+                  error_category: categorizeError(error),
+                });
+                console.warn('[Voice] Auto-pronounce failed:', error instanceof Error ? error.message : error);
+              });
+          }
         }
 
         const notifications = getNotifications();
@@ -174,7 +218,7 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
         setConnectionState('disconnected');
         return;
       }
-      connectWithConfig(config);
+      await connectWithActiveProfile();
     }
 
     init();
@@ -195,6 +239,9 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
       timestamp: Date.now(),
     };
     setMessages((prev) => [...prev, userMsg]);
+    if (activeGatewayIdRef.current) {
+      appendConversationMessage(activeGatewayIdRef.current, userMsg).catch(() => {});
+    }
     setStreamingText('');
     setAwaitingResponse(false);
     stoppedResponseRef.current = false;
@@ -213,6 +260,9 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
         timestamp: Date.now(),
       };
       setMessages((prev) => [...prev, systemMsg]);
+      if (activeGatewayIdRef.current) {
+        appendConversationMessage(activeGatewayIdRef.current, systemMsg).catch(() => {});
+      }
     }
   }, []);
 
@@ -227,10 +277,16 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const reconnect = useCallback(async () => {
-    const config = await getGatewayConfig();
-    if (config) {
-      connectWithConfig(config);
+    const profile = await getActiveGatewayProfile();
+    if (profile) {
+      setActiveGatewayId(profile.id);
+      activeGatewayIdRef.current = profile.id;
+      setMessages(await loadConversationHistory(profile.id));
+      connectWithConfig(gatewayProfileToConfig(profile), profile.id);
     } else {
+      activeGatewayIdRef.current = null;
+      setActiveGatewayId(null);
+      setMessages([]);
       setConnectionState('disconnected');
       setConnectionError('No gateway is configured');
     }
@@ -246,6 +302,7 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
     sendMessage,
     stopChat,
     reconnect,
+    activeGatewayId,
   };
 
   return (

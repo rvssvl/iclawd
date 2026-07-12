@@ -6,11 +6,18 @@ import * as Updates from 'expo-updates';
 import Constants from 'expo-constants';
 import * as SecureStore from '@/services/SafeSecureStore';
 import { colors, spacing, fontSize, borderRadius } from '@/constants/theme';
-import { getGatewayConfig, deleteGatewayConfig } from '@/services/SecureStorage';
+import {
+  deleteGatewayProfile,
+  getActiveGatewayProfile,
+  getGatewayProfiles,
+  renameGatewayProfile,
+  setActiveGatewayProfile,
+} from '@/services/GatewayProfiles';
+import { clearConversationHistory } from '@/services/ConversationHistory';
+import { useGatewayContext } from '@/contexts/GatewayContext';
 import { addSiriShortcut } from '@/services/SiriService';
-import { getAnalyticsDiagnostics, isAnalyticsEnabled, sendAnalyticsTestEvent, setAnalyticsEnabled, track } from '@/services/AnalyticsService';
-import type { AnalyticsDiagnostics } from '@/services/AnalyticsService';
-import type { GatewayConfig } from '@/types/gateway';
+import { isAnalyticsEnabled, setAnalyticsEnabled, track } from '@/services/AnalyticsService';
+import type { GatewayProfile } from '@/types/gateway';
 import {
   DEFAULT_ELEVENLABS_TTS_SIMILARITY,
   DEFAULT_ELEVENLABS_TTS_SPEED,
@@ -33,6 +40,7 @@ import {
   VOICE_LANGUAGE_OPTIONS,
 } from '@/services/VoiceLanguageConfig';
 import type { VoiceLanguageOption } from '@/services/VoiceLanguageConfig';
+import { syncWatchConfiguration } from '@/services/WatchBridge';
 
 const KEY_AUTO_PRONOUNCE = 'iclawd_auto_pronounce';
 const KEY_NOTIFICATIONS = 'iclawd_notifications';
@@ -52,7 +60,9 @@ async function saveElevenLabsKey(key: string): Promise<void> {
 
 export default function SettingsScreen() {
   const router = useRouter();
-  const [config, setConfig] = useState<GatewayConfig | null>(null);
+  const { reconnect, activeGatewayId } = useGatewayContext();
+  const [profiles, setProfiles] = useState<GatewayProfile[]>([]);
+  const [activeProfile, setActiveProfile] = useState<GatewayProfile | null>(null);
   const [elevenLabsKey, setElevenLabsKey] = useState('');
   const [editingKey, setEditingKey] = useState(false);
   const [keyInput, setKeyInput] = useState('');
@@ -60,8 +70,6 @@ export default function SettingsScreen() {
   const [notifications, setNotifications] = useState(true);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [usageAnalytics, setUsageAnalytics] = useState(true);
-  const [analyticsDiagnostics, setAnalyticsDiagnostics] = useState<AnalyticsDiagnostics | null>(null);
-  const [sendingAnalyticsTest, setSendingAnalyticsTest] = useState(false);
   const [ttsVoiceId, setTtsVoiceId] = useState(DEFAULT_ELEVENLABS_VOICE_ID);
   const [ttsSpeed, setTtsSpeed] = useState(String(DEFAULT_ELEVENLABS_TTS_SPEED));
   const [ttsStability, setTtsStability] = useState(String(DEFAULT_ELEVENLABS_TTS_STABILITY));
@@ -70,7 +78,7 @@ export default function SettingsScreen() {
   const [voiceLanguage, setVoiceLanguageState] = useState<VoiceLanguageOption>(DEFAULT_VOICE_LANGUAGE);
 
   useEffect(() => {
-    getGatewayConfig().then(setConfig);
+    loadGatewayProfiles();
     getElevenLabsKey().then((k) => { if (k) setElevenLabsKey(k); });
     getElevenLabsTtsSettings().then((settings) => {
       setTtsVoiceId(settings.voiceId);
@@ -83,26 +91,95 @@ export default function SettingsScreen() {
     SecureStore.getItemAsync(KEY_NOTIFICATIONS).then((v) => setNotifications(v !== 'false'));
     isElevenLabsSttEnabled().then(setElevenLabsStt);
     isAnalyticsEnabled().then(setUsageAnalytics);
-    getAnalyticsDiagnostics().then(setAnalyticsDiagnostics);
     track('settings_opened', { screen: 'settings' });
   }, []);
 
-  function handleDisconnect() {
+  async function loadGatewayProfiles() {
+    const [nextProfiles, nextActive] = await Promise.all([
+      getGatewayProfiles(),
+      getActiveGatewayProfile(),
+    ]);
+    setProfiles(nextProfiles);
+    setActiveProfile(nextActive);
+  }
+
+  function handleDeleteGateway(profile: GatewayProfile) {
     Alert.alert(
-      'Disconnect Gateway',
-      'This will remove your gateway credentials. You can reconnect anytime.',
+      'Delete Gateway',
+      `Remove ${profile.name || 'this gateway'} from ClawVoice? Conversation history stays on this device unless you clear it separately.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Disconnect',
+          text: 'Delete',
           style: 'destructive',
           onPress: async () => {
-            await deleteGatewayConfig();
-            router.replace('/');
+            await deleteGatewayProfile(profile.id);
+            track('gateway_deleted', { screen: 'settings', gateway_backend: profile.backend });
+            await loadGatewayProfiles();
+            await reconnect();
+            await syncWatchConfiguration();
           },
         },
       ],
     );
+  }
+
+  async function handleSwitchGateway(profile: GatewayProfile) {
+    await setActiveGatewayProfile(profile.id);
+    track('gateway_switched', { screen: 'settings', gateway_backend: profile.backend });
+    await loadGatewayProfiles();
+    await reconnect();
+    await syncWatchConfiguration();
+  }
+
+  function handleRenameGateway(profile: GatewayProfile) {
+    if (Platform.OS !== 'ios' || !Alert.prompt) {
+      Alert.alert('Rename Gateway', 'Rename is currently available from iOS prompts. You can delete and re-add the gateway with a new name.');
+      return;
+    }
+
+    Alert.prompt(
+      'Rename Gateway',
+      'Choose a local display name.',
+      async (nextName) => {
+        if (!nextName?.trim()) return;
+        await renameGatewayProfile(profile.id, nextName);
+        await loadGatewayProfiles();
+      },
+      'plain-text',
+      profile.name,
+    );
+  }
+
+  function handleClearCurrentHistory() {
+    if (!activeProfile) return;
+    Alert.alert('Clear Current Conversation', 'This removes local messages for the active gateway from this device only.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Clear',
+        style: 'destructive',
+        onPress: async () => {
+          await clearConversationHistory(activeProfile.id);
+          track('conversation_history_cleared', { screen: 'settings', action: 'current' });
+          await reconnect();
+        },
+      },
+    ]);
+  }
+
+  function handleClearAllHistory() {
+    Alert.alert('Clear All History', 'This removes all local ClawVoice conversation history from this device only.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Clear All',
+        style: 'destructive',
+        onPress: async () => {
+          await clearConversationHistory();
+          track('conversation_history_cleared', { screen: 'settings', action: 'all' });
+          await reconnect();
+        },
+      },
+    ]);
   }
 
   function handleEditKey() {
@@ -120,6 +197,7 @@ export default function SettingsScreen() {
       await setElevenLabsSttEnabled(false);
       setElevenLabsStt(false);
     }
+    await syncWatchConfiguration();
     setEditingKey(false);
   }
 
@@ -139,6 +217,7 @@ export default function SettingsScreen() {
           await setElevenLabsSttEnabled(false);
           setElevenLabsKey('');
           setElevenLabsStt(false);
+          await syncWatchConfiguration();
         },
       },
     ]);
@@ -157,6 +236,7 @@ export default function SettingsScreen() {
   async function toggleElevenLabsStt(value: boolean) {
     setElevenLabsStt(value);
     await setElevenLabsSttEnabled(value);
+    await syncWatchConfiguration();
     track('elevenlabs_stt_enabled', { screen: 'settings', enabled: value });
   }
 
@@ -174,7 +254,10 @@ export default function SettingsScreen() {
           if (buttonIndex === cancelButtonIndex) return;
           const next = VOICE_LANGUAGE_OPTIONS[buttonIndex];
           if (!next) return;
-          setVoiceLanguage(next.locale).then(setVoiceLanguageState);
+          setVoiceLanguage(next.locale)
+            .then(setVoiceLanguageState)
+            .then(() => syncWatchConfiguration())
+            .catch(() => {});
         },
       );
       return;
@@ -182,7 +265,10 @@ export default function SettingsScreen() {
 
     const currentIndex = VOICE_LANGUAGE_OPTIONS.findIndex((option) => option.locale === voiceLanguage.locale);
     const next = VOICE_LANGUAGE_OPTIONS[(currentIndex + 1) % VOICE_LANGUAGE_OPTIONS.length] || DEFAULT_VOICE_LANGUAGE;
-    setVoiceLanguage(next.locale).then(setVoiceLanguageState);
+    setVoiceLanguage(next.locale)
+      .then(setVoiceLanguageState)
+      .then(() => syncWatchConfiguration())
+      .catch(() => {});
   }
 
   async function toggleUsageAnalytics(value: boolean) {
@@ -190,32 +276,6 @@ export default function SettingsScreen() {
     await setAnalyticsEnabled(value);
     if (value) {
       await track('settings_opened', { screen: 'settings' });
-    }
-    setAnalyticsDiagnostics(await getAnalyticsDiagnostics());
-  }
-
-  async function handleSendAnalyticsTest() {
-    if (!usageAnalytics) {
-      Alert.alert('Analytics is off', 'Turn on Usage Analytics first, then send a test event.');
-      return;
-    }
-
-    setSendingAnalyticsTest(true);
-    try {
-      const nextDiagnostics = await sendAnalyticsTestEvent();
-      setAnalyticsDiagnostics(nextDiagnostics);
-      if (nextDiagnostics.lastEventStatus === 'sent') {
-        Alert.alert('Test event sent', 'Open Firebase Realtime or DebugView and look for analytics_test_sent.');
-      } else if (nextDiagnostics.lastEventStatus === 'module_missing') {
-        Alert.alert('Firebase not loaded', 'The analytics native module is not available in this installed build.');
-      } else {
-        Alert.alert('Analytics test failed', nextDiagnostics.lastEventError || 'The app could not send the test event.');
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Could not send analytics test event.';
-      Alert.alert('Analytics test failed', message);
-    } finally {
-      setSendingAnalyticsTest(false);
     }
   }
 
@@ -267,29 +327,45 @@ export default function SettingsScreen() {
   const bundleDate = Updates.createdAt
     ? Updates.createdAt.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
     : null;
-  const analyticsLastEventLabel = formatAnalyticsLastEvent(analyticsDiagnostics);
   const appVersion = Constants.expoConfig?.version || 'Unavailable';
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       {/* Gateway Section */}
-      <Text style={styles.sectionTitle}>Gateway</Text>
+      <Text style={styles.sectionTitle}>Gateways</Text>
       <View style={styles.card}>
-        {config ? (
+        {profiles.length > 0 ? (
           <>
-            <View style={styles.row}>
-              <Text style={styles.rowLabel}>URL</Text>
-              <Text style={styles.rowValue} numberOfLines={1}>{config.url}</Text>
-            </View>
+            {profiles.map((profile, index) => (
+              <View key={profile.id}>
+                {index > 0 && <View style={styles.divider} />}
+                <View style={styles.gatewayRow}>
+                  <Pressable style={styles.gatewayMain} onPress={() => handleSwitchGateway(profile)}>
+                    <Ionicons
+                      name={profile.id === (activeProfile?.id || activeGatewayId) ? 'checkmark-circle' : 'ellipse-outline'}
+                      size={20}
+                      color={profile.id === (activeProfile?.id || activeGatewayId) ? colors.primaryLight : colors.textMuted}
+                    />
+                    <View style={styles.rowText}>
+                      <Text style={styles.rowLabel}>{profile.name || 'OpenClaw Gateway'}</Text>
+                      <Text style={styles.rowDescription} numberOfLines={1}>{safeHostLabel(profile.url)}</Text>
+                    </View>
+                  </Pressable>
+                  <View style={styles.gatewayActions}>
+                    <Pressable onPress={() => handleRenameGateway(profile)} hitSlop={8}>
+                      <Ionicons name="pencil-outline" size={18} color={colors.textSecondary} />
+                    </Pressable>
+                    <Pressable onPress={() => handleDeleteGateway(profile)} hitSlop={8}>
+                      <Ionicons name="trash-outline" size={18} color={colors.error} />
+                    </Pressable>
+                  </View>
+                </View>
+              </View>
+            ))}
             <View style={styles.divider} />
-            <View style={styles.row}>
-              <Text style={styles.rowLabel}>Name</Text>
-              <Text style={styles.rowValue}>{config.name || 'My Gateway'}</Text>
-            </View>
-            <View style={styles.divider} />
-            <Pressable style={styles.row} onPress={handleDisconnect}>
-              <Text style={[styles.rowLabel, { color: colors.error }]}>Disconnect</Text>
-              <Ionicons name="log-out-outline" size={18} color={colors.error} />
+            <Pressable style={styles.row} onPress={() => router.push('/connect')}>
+              <Text style={styles.rowLabel}>Add Gateway</Text>
+              <Ionicons name="add-circle-outline" size={18} color={colors.primary} />
             </Pressable>
           </>
         ) : (
@@ -434,7 +510,7 @@ export default function SettingsScreen() {
       {/* Siri Section (iOS only) */}
       {Platform.OS === 'ios' && (
         <>
-          <Text style={styles.sectionTitle}>Siri</Text>
+          <Text style={styles.sectionTitle}>Siri & Shortcuts</Text>
           <View style={styles.card}>
             <Pressable style={styles.row} onPress={() => addSiriShortcut()}>
               <Text style={styles.rowLabel}>Add to Siri</Text>
@@ -443,12 +519,32 @@ export default function SettingsScreen() {
             <View style={styles.divider} />
             <View style={styles.row}>
               <Text style={[styles.rowLabel, { fontSize: fontSize.sm, color: colors.textSecondary }]}>
-                Say "Hey Siri, Clawd Voice" to launch voice mode
+                Add the suggested shortcut, then customize the phrase in Shortcuts or Siri settings.
               </Text>
             </View>
           </View>
         </>
       )}
+
+      {/* History Section */}
+      <Text style={styles.sectionTitle}>History</Text>
+      <View style={styles.card}>
+        <Pressable style={styles.row} onPress={handleClearCurrentHistory} disabled={!activeProfile}>
+          <View style={styles.rowText}>
+            <Text style={[styles.rowLabel, !activeProfile && styles.disabledText]}>Clear Current Conversation</Text>
+            <Text style={styles.rowDescription}>Local messages for the active gateway only.</Text>
+          </View>
+          <Ionicons name="close-circle-outline" size={18} color={activeProfile ? colors.error : colors.textMuted} />
+        </Pressable>
+        <View style={styles.divider} />
+        <Pressable style={styles.row} onPress={handleClearAllHistory}>
+          <View style={styles.rowText}>
+            <Text style={[styles.rowLabel, { color: colors.error }]}>Clear All Local History</Text>
+            <Text style={styles.rowDescription}>Removes saved conversations from this device.</Text>
+          </View>
+          <Ionicons name="trash-outline" size={18} color={colors.error} />
+        </Pressable>
+      </View>
 
       {/* Responses Section */}
       <Text style={styles.sectionTitle}>Responses</Text>
@@ -488,47 +584,6 @@ export default function SettingsScreen() {
             trackColor={{ false: colors.border, true: colors.primary }}
           />
         </View>
-        <View style={styles.divider} />
-        <View style={styles.row}>
-          <Text style={styles.rowLabel}>Firebase Module</Text>
-          <Text style={styles.rowValue}>
-            {analyticsDiagnostics ? (analyticsDiagnostics.moduleLoaded ? 'Loaded' : 'Missing') : 'Checking'}
-          </Text>
-        </View>
-        <View style={styles.divider} />
-        <View style={styles.row}>
-          <Text style={styles.rowLabel}>Firebase Project</Text>
-          <Text style={styles.rowValue} numberOfLines={1}>
-            {analyticsDiagnostics?.projectId || 'Unknown'}
-          </Text>
-        </View>
-        <View style={styles.divider} />
-        <View style={styles.row}>
-          <Text style={styles.rowLabel}>Firebase App</Text>
-          <Text style={styles.rowValue} numberOfLines={1}>
-            {analyticsDiagnostics?.appId || 'Unknown'}
-          </Text>
-        </View>
-        <View style={styles.divider} />
-        <View style={styles.row}>
-          <Text style={styles.rowLabel}>Last Analytics Event</Text>
-          <Text style={styles.rowValue} numberOfLines={2}>
-            {analyticsLastEventLabel}
-          </Text>
-        </View>
-        <View style={styles.divider} />
-        <Pressable
-          style={styles.row}
-          onPress={handleSendAnalyticsTest}
-          disabled={sendingAnalyticsTest}
-        >
-          <Text style={styles.rowLabel}>Send Test Event</Text>
-          {sendingAnalyticsTest ? (
-            <ActivityIndicator size="small" color={colors.primaryLight} />
-          ) : (
-            <Ionicons name="analytics-outline" size={18} color={colors.primary} />
-          )}
-        </Pressable>
       </View>
 
       {/* About Section */}
@@ -574,19 +629,6 @@ export default function SettingsScreen() {
   );
 }
 
-function formatAnalyticsLastEvent(diagnostics: AnalyticsDiagnostics | null): string {
-  if (!diagnostics?.lastEventStatus) return 'No event yet';
-
-  const status = diagnostics.lastEventStatus.replace(/_/g, ' ');
-  if (!diagnostics.lastEventAt) return status;
-
-  const date = new Date(diagnostics.lastEventAt);
-  if (Number.isNaN(date.getTime())) return status;
-
-  const time = date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-  return `${status} · ${time}`;
-}
-
 function prepareUpdateRequestHeaders() {
   if (Updates.channel) return;
 
@@ -606,6 +648,14 @@ function getUpdateCheckErrorMessage(error: unknown): string {
   }
 
   return message || 'Could not check for updates.';
+}
+
+function safeHostLabel(url: string): string {
+  try {
+    return new URL(url).host || 'OpenClaw gateway';
+  } catch {
+    return url.replace(/^wss?:\/\//, '').split('/')[0] || 'OpenClaw gateway';
+  }
 }
 
 const styles = StyleSheet.create({
@@ -658,6 +708,29 @@ const styles = StyleSheet.create({
   rowText: {
     flex: 1,
     paddingRight: spacing.md,
+  },
+  gatewayRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+    minHeight: 58,
+    gap: spacing.md,
+  },
+  gatewayMain: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  gatewayActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  disabledText: {
+    color: colors.textMuted,
   },
   settingInputRow: {
     flexDirection: 'row',

@@ -12,17 +12,22 @@ import {
   ScrollView,
 } from 'react-native';
 import { useRouter } from 'expo-router';
+import { useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, fontSize, borderRadius } from '@/constants/theme';
-import { saveGatewayConfig } from '@/services/SecureStorage';
+import { saveGatewayProfile } from '@/services/GatewayProfiles';
 import { GatewayClient } from '@/services/GatewayClient';
 import { donateSiriShortcut } from '@/services/SiriService';
+import { syncWatchConfiguration } from '@/services/WatchBridge';
+import { normalizeGatewayUrl } from '@/services/GatewayPairing';
 import { categorizeError, getGatewayUrlType, track } from '@/services/AnalyticsService';
 
 export default function ConnectScreen() {
   const router = useRouter();
-  const [url, setUrl] = useState('');
-  const [token, setToken] = useState('');
+  const params = useLocalSearchParams<{ scannedUrl?: string; scannedToken?: string; scannedName?: string }>();
+  const [url, setUrl] = useState(params.scannedUrl || '');
+  const [token, setToken] = useState(params.scannedToken || '');
+  const [name, setName] = useState(params.scannedName || '');
   const [connecting, setConnecting] = useState(false);
 
   async function handleConnect() {
@@ -48,7 +53,7 @@ export default function ConnectScreen() {
       });
       Alert.alert(
         'Use a reachable gateway URL',
-        '127.0.0.1 and localhost point to this phone, not your OpenClaw computer. Use your computer LAN IP, Tailscale IP, or PrimeClaws URL instead, such as ws://100.x.x.x:18789.',
+        '127.0.0.1 and localhost point to this phone, not your OpenClaw computer. Use your HTTPS/WSS domain, Tailscale IP, or LAN IP instead, such as wss://myclaw.example.com or ws://100.x.x.x:18789.',
       );
       return;
     }
@@ -72,13 +77,19 @@ export default function ConnectScreen() {
         return;
       }
 
-      // Save config
-      await saveGatewayConfig({
+      await saveGatewayProfile({
+        backend: 'openclaw',
         url: wsUrl,
         token: trimmedToken,
-        name: 'My Gateway',
+        name: name.trim() || 'My Gateway',
       });
+      await syncWatchConfiguration();
 
+      track(params.scannedUrl ? 'qr_pairing_succeeded' : 'gateway_added', {
+        screen: 'connect',
+        provider: 'openclaw',
+        url_type: getGatewayUrlType(wsUrl),
+      });
       track('connect_succeeded', {
         screen: 'connect',
         url_type: getGatewayUrlType(wsUrl),
@@ -110,8 +121,8 @@ export default function ConnectScreen() {
         <View style={styles.infoCard}>
           <Ionicons name="information-circle" size={20} color={colors.info} />
           <Text style={styles.infoText}>
-            Use a URL your phone can reach, such as a PrimeClaws URL, Tailscale IP, or LAN IP.
-            127.0.0.1 only works on the device running OpenClaw.
+            Use a URL your phone can reach, such as wss://myclaw.example.com, https://myclaw.example.com,
+            a Tailscale IP, or a LAN IP. 127.0.0.1 only works on the device running OpenClaw.
           </Text>
         </View>
 
@@ -121,7 +132,7 @@ export default function ConnectScreen() {
           style={styles.input}
           value={url}
           onChangeText={setUrl}
-          placeholder="100.x.x.x:18789 or gateway.example.com"
+          placeholder="wss://myclaw.example.com or 100.x.x.x:18789"
           placeholderTextColor={colors.textMuted}
           autoCapitalize="none"
           autoCorrect={false}
@@ -141,6 +152,18 @@ export default function ConnectScreen() {
           secureTextEntry
         />
 
+        {/* Name Input */}
+        <Text style={styles.label}>Name</Text>
+        <TextInput
+          style={styles.input}
+          value={name}
+          onChangeText={setName}
+          placeholder="My Gateway"
+          placeholderTextColor={colors.textMuted}
+          autoCapitalize="words"
+          autoCorrect={false}
+        />
+
         {/* Connect Button */}
         <Pressable
           style={[styles.connectButton, connecting && styles.connectButtonDisabled]}
@@ -158,36 +181,13 @@ export default function ConnectScreen() {
         </Pressable>
 
         {/* QR code scan - placeholder for later */}
-        <Pressable style={styles.qrButton}>
+        <Pressable style={styles.qrButton} onPress={() => router.push('/qr-scan')}>
           <Ionicons name="qr-code" size={20} color={colors.primaryLight} />
           <Text style={styles.qrButtonText}>Scan QR Code</Text>
         </Pressable>
       </ScrollView>
     </KeyboardAvoidingView>
   );
-}
-
-function normalizeGatewayUrl(rawUrl: string): string {
-  const url = rawUrl.trim();
-  if (url.startsWith('http://')) {
-    return url.replace('http://', 'ws://');
-  }
-  if (url.startsWith('https://')) {
-    return url.replace('https://', 'wss://');
-  }
-  if (url.startsWith('ws://') || url.startsWith('wss://')) {
-    return url;
-  }
-
-  return `${shouldDefaultToPlainWebSocket(url) ? 'ws' : 'wss'}://${url}`;
-}
-
-function shouldDefaultToPlainWebSocket(urlWithoutScheme: string): boolean {
-  const host = urlWithoutScheme.split('/')[0].split(':')[0].toLowerCase();
-  return isLocalhostHost(host)
-    || isIPv4Host(host)
-    || host.endsWith('.local')
-    || !host.includes('.');
 }
 
 function isLocalhostUrl(wsUrl: string): boolean {
@@ -204,10 +204,6 @@ function isLocalhostHost(host: string): boolean {
     || host === '0.0.0.0'
     || host === '::1'
     || host === '[::1]';
-}
-
-function isIPv4Host(host: string): boolean {
-  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host);
 }
 
 async function testConnection(wsUrl: string, token: string): Promise<{ ok: boolean; error?: string }> {

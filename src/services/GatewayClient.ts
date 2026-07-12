@@ -415,13 +415,14 @@ export class GatewayClient {
       this.connectResolve?.();
     } else {
       const errMsg = frame.error?.message || 'Connection rejected';
-      this.notifyError(formatGatewayError(frame.error?.code, errMsg));
+      const formattedError = formatGatewayError(frame.error?.code, errMsg);
+      this.notifyError(formattedError);
       if (frame.error?.retryable) {
         this.scheduleReconnect(frame.error.retryAfterMs);
       } else {
         this.setState('error');
       }
-      this.connectReject?.(new Error(errMsg));
+      this.connectReject?.(new Error(formattedError));
     }
     this.connectResolve = null;
     this.connectReject = null;
@@ -686,7 +687,7 @@ function extractMessageText(message?: Record<string, unknown>): string {
 function formatGatewayError(code: string | undefined, message: string): string {
   const normalized = `${code || ''} ${message}`.toLowerCase();
   if (normalized.includes('pair') || normalized.includes('approve') || normalized.includes('device')) {
-    return 'Device approval required in OpenClaw.';
+    return 'Approve this phone in OpenClaw, then try again. In the OpenClaw web portal, run pair approve or pair approve all.';
   }
   if (normalized.includes('token') || normalized.includes('auth') || normalized.includes('unauthorized')) {
     return 'Gateway authentication failed. Check your token.';

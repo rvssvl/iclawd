@@ -9,8 +9,10 @@ ClawVoice for OpenClaw, formerly Iclawd, is a voice-first mobile companion for [
 - **Language selection** — choose the STT/TTS language used by system speech, ElevenLabs, and the gateway locale
 - **ElevenLabs STT + TTS** — optional API transcription and natural-sounding voice responses, with system speech available
 - **CarPlay voice mode** — hands-free voice control from supported CarPlay environments
-- **Apple Watch remote** — lightweight companion controls for starting, pausing, and stopping iPhone voice sessions
+- **Apple Watch voice conversations** — speak and hear replies on the Watch, with an iPhone-session fallback
 - **Siri Shortcuts** — say "Hey Siri, Ask Claw" to jump straight into voice mode
+- **Gateway profiles + QR pairing** — scan a pairing code or keep separate work/personal gateways
+- **Local conversation history** — restore recent chats on-device without cloud sync
 - **Secure by design** — Ed25519 device authentication, credentials stored in iOS Keychain / Android Keystore
 - **Self-hosted** — connects to YOUR OpenClaw gateway, no third-party cloud, no vendor lock-in
 - **Open source** — MIT licensed
@@ -123,6 +125,16 @@ src/
 
 **Gateway connection** is configured in-app (Settings or first-launch flow). Enter your OpenClaw gateway URL and auth token.
 
+**Gateway profiles** let you keep multiple OpenClaw gateways, switch the active gateway in Settings, and pair by QR code.
+
+**Conversation history** is stored locally on the device per gateway profile and can be cleared from Settings.
+
+### Apple Watch voice mode
+
+Open the iPhone app once after configuring or switching gateways so it can securely provision the active gateway to the Watch. The Watch creates its own signing identity in the Watch keychain; OpenClaw may ask you to approve the Watch as a new device on its first direct connection.
+
+Without ElevenLabs STT, the Watch uses the system dictation sheet for each turn. With ElevenLabs STT enabled in iPhone Settings, ClawVoice records directly on the Watch, detects end-of-speech, and automatically opens a short foreground follow-up window after each spoken reply. Lowering your wrist ends microphone capture; tap again to continue later with the same gateway session.
+
 **ElevenLabs TTS** (optional) can be enabled in Settings by providing your API key. Without it, the app uses the built-in system voice.
 
 **Voice language** can be selected in Settings. The selected language is used for system speech recognition, system TTS, ElevenLabs STT/TTS language hints, and the OpenClaw gateway locale.
@@ -141,7 +153,7 @@ src/
 | Animation | React Native Reanimated |
 | Networking | WebSocket (OpenClaw Gateway v3 protocol) |
 | Auth | Ed25519 signing (tweetnacl) |
-| Storage | Expo Secure Store (Keychain / Keystore) |
+| Storage | Expo Secure Store (Keychain / Keystore) + local file history |
 
 ## Roadmap
 
@@ -154,15 +166,15 @@ src/
 - [x] Siri Shortcuts
 - [x] OTA updates & push notifications
 - [x] CarPlay voice mode
-- [x] Apple Watch remote
-- [ ] QR code gateway pairing
-- [ ] Multiple gateway support
-- [ ] Conversation history
-- [ ] App Intents for deeper Siri integration
+- [x] Apple Watch voice conversations
+- [x] QR code gateway pairing
+- [x] Multiple gateway support
+- [x] Conversation history
+- [x] App Intents for deeper Siri integration
 
 ## Privacy
 
-ClawVoice uses minimal usage analytics to understand onboarding, connection reliability, voice reliability, and CarPlay usage. Analytics can be disabled in Settings. The app does not collect prompts, assistant messages, transcripts, audio, gateway URLs, auth tokens, ElevenLabs keys, or device tokens. See [Privacy Policy](https://rvssvl.github.io/iclawd/#privacy-policy) for details.
+ClawVoice uses minimal usage analytics to understand onboarding, connection reliability, voice reliability, and CarPlay usage. Analytics can be disabled in Settings. The app does not collect prompts, assistant messages, transcripts, audio, gateway URLs, auth tokens, ElevenLabs keys, or device tokens. Conversation history is stored locally on your device and can be cleared in Settings. See [Privacy Policy](https://rvssvl.github.io/iclawd/#privacy-policy) for details.
 
 ## Contributing
 

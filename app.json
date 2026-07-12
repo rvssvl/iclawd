@@ -2,7 +2,7 @@
   "expo": {
     "name": "ClawVoice",
     "slug": "third-voice-ai",
-    "version": "3.0.0",
+    "version": "3.1.0",
     "description": "ClawVoice, formerly Iclawd, lets you control OpenClaw agents by voice from CarPlay.",
     "keywords": [
       "iclawd",
@@ -17,7 +17,10 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
-    "scheme": "iclawd",
+    "scheme": [
+      "clawvoice",
+      "iclawd"
+    ],
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -26,13 +29,26 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.rakhimzhan.ai.third.voice",
-      "buildNumber": "14",
+      "buildNumber": "17",
       "googleServicesFile": "./GoogleService-Info.plist",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "ClawVoice needs microphone access for voice conversations with your OpenClaw agent.",
         "NSSpeechRecognitionUsageDescription": "ClawVoice uses speech recognition to convert your voice to text.",
         "NSCameraUsageDescription": "ClawVoice uses the camera to scan QR codes for gateway connection.",
         "NSPhotoLibraryUsageDescription": "ClawVoice may access your photo library to share images with your AI agent.",
+        "NSUserActivityTypes": [
+          "$(PRODUCT_BUNDLE_IDENTIFIER).expo.index_route",
+          "com.rakhimzhan.ai.third.voice.ask"
+        ],
+        "CFBundleURLTypes": [
+          {
+            "CFBundleURLSchemes": [
+              "clawvoice",
+              "iclawd",
+              "com.rakhimzhan.ai.third.voice"
+            ]
+          }
+        ],
         "UIBackgroundModes": [
           "audio"
         ]
@@ -40,7 +56,7 @@
     },
     "android": {
       "package": "com.rakhimzhan.ai.third.voice",
-      "versionCode": 204,
+      "versionCode": 210,
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
@@ -58,7 +74,7 @@
       }
     },
     "owner": "rassul.rakhimzhan",
-    "runtimeVersion": "3.0.0",
+    "runtimeVersion": "3.1.0",
     "updates": {
       "url": "https://u.expo.dev/3e46a0eb-c2c5-4191-bd9e-c356c499f4e5",
       "requestHeaders": {
@@ -67,10 +83,10 @@
     },
     "plugins": [
       "expo-router",
+      "expo-camera",
       "expo-secure-store",
       "./plugins/with-optional-firebase",
       "./plugins/with-carplay",
-      "./plugins/with-watchos",
       "@config-plugins/react-native-siri-shortcut",
       [
         "expo-splash-screen",
@@ -79,7 +95,9 @@
           "imageWidth": 200,
           "backgroundColor": "#060c18"
         }
-      ]
+      ],
+      "./plugins/with-app-intents",
+      "./plugins/with-watchos"
     ]
   }
 }

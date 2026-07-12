@@ -107,9 +107,18 @@ export interface GatewayStatus {
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'error';
 
 // Gateway config stored in secure storage
+export type GatewayBackend = 'openclaw' | 'hermes';
+
 export interface GatewayConfig {
   url: string;
   token: string;
   deviceToken?: string;
   name?: string;
+}
+
+export interface GatewayProfile extends GatewayConfig {
+  id: string;
+  backend: GatewayBackend;
+  createdAt: number;
+  lastConnectedAt?: number;
 }

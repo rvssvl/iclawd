@@ -102,4 +102,59 @@ assert.equal(getVoiceOrbState('recovering', 'preparingAudio'), 'thinking');
 assert.equal(getVoiceOrbState('listening', 'idle'), 'listening');
 assert.equal(getVoiceOrbState('paused', 'speaking'), 'speaking');
 
+const assistantSpeechPath = path.join(__dirname, 'src/utils/assistantSpeechText.ts');
+const assistantSpeechSource = fs.readFileSync(assistantSpeechPath, 'utf8');
+const assistantSpeechCompiled = ts.transpileModule(assistantSpeechSource, {
+  compilerOptions: {
+    module: ts.ModuleKind.CommonJS,
+    target: ts.ScriptTarget.ES2020,
+  },
+}).outputText;
+
+const assistantSpeechModule = { exports: {} };
+new Function('module', 'exports', assistantSpeechCompiled)(assistantSpeechModule, assistantSpeechModule.exports);
+
+const {
+  prepareAssistantSpeechText,
+  isLikelyAssistantEcho,
+  normalizeForEchoMatch,
+} = assistantSpeechModule.exports;
+
+assert.equal(
+  prepareAssistantSpeechText('**KITT:** Certainly, Paul. Here is the summary.'),
+  'Certainly, Paul. Here is the summary.',
+);
+
+assert.equal(
+  prepareAssistantSpeechText('KITT: **Key Details:**\n\n---\n\n| Source | Amount |\n| --- | --- |\n| NYT | **$1.4 billion** |'),
+  'Key Details: Source, Amount. NYT, $1.4 billion',
+);
+
+assert.equal(
+  prepareAssistantSpeechText('Read [the guide](https://example.com/setup) before pairing.'),
+  'Read the guide before pairing.',
+);
+
+const normalizedAssistant = normalizeForEchoMatch(
+  'Certainly, Paul. Here is a comprehensive summary about the weather warning and what to do next.',
+);
+
+assert.equal(
+  isLikelyAssistantEcho(
+    'Here is a comprehensive summary about the weather warning',
+    normalizedAssistant,
+    Date.now() - 2000,
+  ),
+  true,
+);
+
+assert.equal(
+  isLikelyAssistantEcho(
+    'Should I pull over until the storm passes?',
+    normalizedAssistant,
+    Date.now() - 2000,
+  ),
+  false,
+);
+
 console.log('voice conversation state tests passed');

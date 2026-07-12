@@ -16,6 +16,10 @@ const MAX_STRING_LENGTH = 80;
 type AnalyticsValue = string | number | boolean | null | undefined;
 type AnalyticsProps = Record<string, AnalyticsValue>;
 type AnalyticsStatus = 'sent' | 'disabled' | 'module_missing' | 'failed';
+type FirebaseAnalyticsClient = {
+  logEvent: (name: string, params?: AnalyticsProps) => Promise<void>;
+  setAnalyticsCollectionEnabled: (enabled: boolean) => Promise<void>;
+};
 
 export interface AnalyticsDiagnostics {
   enabled: boolean;
@@ -39,6 +43,12 @@ const ALLOWED_EVENTS = new Set([
   'connect_attempted',
   'connect_succeeded',
   'connect_failed',
+  'gateway_added',
+  'gateway_switched',
+  'gateway_deleted',
+  'conversation_history_cleared',
+  'qr_pairing_succeeded',
+  'qr_pairing_failed',
   'first_chat_sent',
   'first_voice_started',
   'first_agent_response_received',
@@ -70,6 +80,7 @@ const ALLOWED_PROPS = new Set([
   'platform',
   'screen',
   'provider',
+  'gateway_backend',
   'connection_result',
   'error_category',
   'carplay',
@@ -84,7 +95,7 @@ const ALLOWED_PROPS = new Set([
 ]);
 
 let cachedEnabled: boolean | null = null;
-let firebaseAnalytics: null | { logEvent: (name: string, params?: AnalyticsProps) => Promise<void>; setAnalyticsCollectionEnabled: (enabled: boolean) => Promise<void> } = null;
+let firebaseAnalytics: null | FirebaseAnalyticsClient = null;
 let firebaseLoadAttempted = false;
 let firebaseLoadError: string | null = null;
 
@@ -115,7 +126,7 @@ export async function track(eventName: string, props: AnalyticsProps = {}): Prom
 
   const analytics = getFirebaseAnalytics();
   if (!analytics) {
-    await recordAnalyticsAttempt(eventName, 'module_missing', firebaseLoadError);
+    await recordAnalyticsAttempt(eventName, getFirebaseLoadStatus(firebaseLoadError), firebaseLoadError);
     if (__DEV__) {
       console.log('[Analytics]', eventName, sanitizeProps(props));
     }
@@ -266,8 +277,13 @@ function sanitizeProps(props: AnalyticsProps): AnalyticsProps {
       if (cleaned) next[key] = cleaned;
       return;
     }
-    if (typeof value === 'number' || typeof value === 'boolean') {
+    if (typeof value === 'number') {
       next[key] = value;
+      return;
+    }
+    if (typeof value === 'boolean') {
+      // Firebase Analytics custom parameters support strings and numbers.
+      next[key] = value ? 1 : 0;
     }
   });
   return next;
@@ -287,8 +303,12 @@ function getFirebaseAnalytics() {
 
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const analyticsModule = require('@react-native-firebase/analytics').default;
-    firebaseAnalytics = analyticsModule();
+    const analyticsModule = require('@react-native-firebase/analytics');
+    const analytics = createFirebaseAnalyticsClient(analyticsModule);
+    if (!analytics) {
+      throw new Error('Firebase Analytics module did not expose a supported API.');
+    }
+    firebaseAnalytics = analytics;
     firebaseLoadError = null;
   } catch (error) {
     firebaseAnalytics = null;
@@ -301,15 +321,64 @@ function getFirebaseAnalytics() {
   return firebaseAnalytics;
 }
 
+function createFirebaseAnalyticsClient(analyticsModule: Record<string, unknown>): FirebaseAnalyticsClient | null {
+  const defaultExport = analyticsModule.default;
+  const namespacedFactory = typeof defaultExport === 'function'
+    ? defaultExport
+    : typeof analyticsModule === 'function'
+      ? analyticsModule
+      : null;
+
+  const namespacedInstance = namespacedFactory
+    ? namespacedFactory()
+    : isFirebaseAnalyticsInstance(defaultExport)
+      ? defaultExport
+      : null;
+
+  if (isFirebaseAnalyticsInstance(namespacedInstance)) {
+    return {
+      logEvent: (name, params) => namespacedInstance.logEvent(name, params),
+      setAnalyticsCollectionEnabled: (enabled) => namespacedInstance.setAnalyticsCollectionEnabled(enabled),
+    };
+  }
+
+  if (typeof analyticsModule.getAnalytics === 'function' && typeof analyticsModule.logEvent === 'function') {
+    const analytics = analyticsModule.getAnalytics();
+    return {
+      logEvent: (name, params) => (analyticsModule.logEvent as Function)(analytics, name, params),
+      setAnalyticsCollectionEnabled: (enabled) => {
+        if (typeof analyticsModule.setAnalyticsCollectionEnabled !== 'function') {
+          return Promise.resolve();
+        }
+        return (analyticsModule.setAnalyticsCollectionEnabled as Function)(analytics, enabled);
+      },
+    };
+  }
+
+  return null;
+}
+
+function isFirebaseAnalyticsInstance(value: unknown): value is FirebaseAnalyticsClient {
+  return Boolean(
+    value
+      && typeof value === 'object'
+      && typeof (value as FirebaseAnalyticsClient).logEvent === 'function'
+      && typeof (value as FirebaseAnalyticsClient).setAnalyticsCollectionEnabled === 'function',
+  );
+}
+
 function getFirebaseAppInfo(): Pick<AnalyticsDiagnostics, 'appId' | 'projectId'> {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const firebaseAppModule = require('@react-native-firebase/app').default;
-    const app = typeof firebaseAppModule.app === 'function'
-      ? firebaseAppModule.app()
-      : typeof firebaseAppModule === 'function'
-        ? firebaseAppModule()
-        : null;
+    const firebaseAppModule = require('@react-native-firebase/app');
+    const appExport = firebaseAppModule.default ?? firebaseAppModule;
+    const app = typeof firebaseAppModule.getApp === 'function'
+      ? firebaseAppModule.getApp()
+      : typeof appExport.app === 'function'
+        ? appExport.app()
+        : typeof appExport === 'function'
+          ? appExport()
+          : null;
     const options = app?.options ?? {};
     return {
       appId: cleanString(options.appId),
@@ -318,6 +387,20 @@ function getFirebaseAppInfo(): Pick<AnalyticsDiagnostics, 'appId' | 'projectId'>
   } catch {
     return {};
   }
+}
+
+function getFirebaseLoadStatus(error: string | null): AnalyticsStatus {
+  const normalized = (error || '').toLowerCase();
+  if (
+    normalized.includes('cannot find module')
+    || normalized.includes('native module')
+    || normalized.includes('not found')
+    || normalized.includes('not installed')
+    || normalized.includes('null')
+  ) {
+    return 'module_missing';
+  }
+  return 'failed';
 }
 
 async function recordAnalyticsAttempt(eventName: string, status: AnalyticsStatus, error?: string | null): Promise<void> {

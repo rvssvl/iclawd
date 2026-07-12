@@ -19,9 +19,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, fontSize, spacing, borderRadius } from '@/constants/theme';
 import { GatewayProvider } from '@/contexts/GatewayContext';
 import { addCarPlayCommandListener } from '@/services/CarPlayBridge';
-import { addWatchCommandListener } from '@/services/WatchBridge';
+import { addWatchCommandListener, syncWatchConfiguration } from '@/services/WatchBridge';
 import { addSiriVoiceLaunchListener, getInitialSiriVoiceLaunch } from '@/services/SiriService';
 import { captureCampaignFromUrl, initializeAnalytics, track } from '@/services/AnalyticsService';
+import { parseGatewayPairingPayload } from '@/services/GatewayPairing';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -197,11 +198,15 @@ export default function RootLayout() {
       .catch(() => {});
 
     Linking.getInitialURL()
-      .then(captureCampaignFromUrl)
+      .then((url) => {
+        captureCampaignFromUrl(url).catch(() => {});
+        handleIncomingUrl(url, router);
+      })
       .catch(() => {});
 
     const sub = Linking.addEventListener('url', ({ url }) => {
       captureCampaignFromUrl(url).catch(() => {});
+      handleIncomingUrl(url, router);
     });
 
     return () => sub.remove();
@@ -222,6 +227,25 @@ export default function RootLayout() {
     });
     return () => sub.remove();
   }, [router]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const provisionWatch = async () => {
+      if (!mounted) return;
+      await syncWatchConfiguration();
+    };
+
+    provisionWatch().catch(() => {});
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') provisionWatch().catch(() => {});
+    });
+
+    return () => {
+      mounted = false;
+      sub.remove();
+    };
+  }, []);
 
   // Handle Siri shortcut launch → navigate to voice mode
   useEffect(() => {
@@ -332,6 +356,14 @@ export default function RootLayout() {
           }}
         />
         <Stack.Screen
+          name="qr-scan"
+          options={{
+            title: 'Scan QR Code',
+            presentation: 'modal',
+            animation: 'slide_from_bottom',
+          }}
+        />
+        <Stack.Screen
           name="chat"
           options={{ title: 'ClawVoice', headerBackTitle: 'Back' }}
         />
@@ -354,6 +386,42 @@ export default function RootLayout() {
       </Stack>
     </GatewayProvider>
   );
+}
+
+function handleIncomingUrl(url: string | null | undefined, router: ReturnType<typeof useRouter>): void {
+  if (!url) return;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return;
+  }
+
+  const scheme = parsed.protocol.replace(':', '');
+  if (scheme !== 'clawvoice' && scheme !== 'iclawd') return;
+
+  const action = parsed.hostname || parsed.pathname.replace('/', '');
+  if (action === 'voice' || action === 'ask') {
+    router.replace('/voice');
+    return;
+  }
+
+  if (action === 'connect') {
+    try {
+      const payload = parseGatewayPairingPayload(url);
+      router.replace({
+        pathname: '/connect',
+        params: {
+          scannedUrl: payload.url,
+          scannedToken: payload.token,
+          scannedName: payload.name || '',
+        },
+      });
+    } catch {
+      router.replace('/connect');
+    }
+  }
 }
 
 const styles = StyleSheet.create({

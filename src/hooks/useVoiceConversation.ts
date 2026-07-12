@@ -9,6 +9,7 @@ import {
   initialVoiceConversationState,
   voiceConversationReducer,
 } from '@/hooks/voiceConversationState';
+import { isLikelyRecentAssistantEcho } from '@/utils/assistantSpeechText';
 
 const QUICK_MANUAL_STOP_MS = 700;
 
@@ -86,6 +87,15 @@ export function useVoiceConversation({
       if (!utterance) return;
       finalTranscriptReceivedRef.current = true;
 
+      if (isLikelyRecentAssistantEcho(utterance)) {
+        track('voice_audio_interrupted', {
+          provider: inputProvider,
+          error_category: 'echo_suppressed',
+        });
+        dispatch({ type: 'START_SESSION' });
+        return;
+      }
+
       const normalized = utterance.toLocaleLowerCase();
       const now = Date.now();
       const lastSent = lastSentUtteranceRef.current;
@@ -110,7 +120,7 @@ export function useVoiceConversation({
         });
       }
     });
-  }, [sendMessage, setOnFinalTranscript]);
+  }, [inputProvider, sendMessage, setOnFinalTranscript]);
 
   useEffect(() => {
     if (awaitingResponse) {

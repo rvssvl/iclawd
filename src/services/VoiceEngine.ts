@@ -36,6 +36,8 @@ const NO_SPEECH_TIMEOUT_MS = 6000;
 const STUCK_LISTENING_GUARD_MS = 30000;
 const ACTIVE_SPEECH_GRACE_MS = 2500;
 const POST_TTS_COOLDOWN_MS = 1000;
+const SYSTEM_TTS_COOLDOWN_MS = 2200;
+const SYSTEM_TTS_CANCEL_GRACE_MS = 4000;
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -97,6 +99,12 @@ function formatAudioError(error: unknown): string {
   }
 
   return message || 'Could not start microphone';
+}
+
+function estimateMinimumSystemSpeechMs(text: string): number {
+  const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
+  const estimatedMs = (wordCount / 2.6) * 1000;
+  return Math.min(35000, Math.max(900, estimatedMs * 0.45));
 }
 
 class VoiceEngineService {
@@ -321,6 +329,12 @@ class VoiceEngineService {
     let started = false;
     let completed = false;
     let utteranceId: string | number | null = null;
+    let startWatchdog: ReturnType<typeof setTimeout> | null = null;
+    let finishDelay: ReturnType<typeof setTimeout> | null = null;
+    let cancelWatchdog: ReturnType<typeof setTimeout> | null = null;
+    const playbackGeneration = this.playbackGeneration;
+    const minimumPlaybackMs = estimateMinimumSystemSpeechMs(text);
+    const queuedAt = Date.now();
 
     const matchesUtterance = (event: TtsEvent | { utteranceId?: string | number }) => {
       if (!utteranceId || !('utteranceId' in event)) return true;
@@ -328,11 +342,13 @@ class VoiceEngineService {
     };
 
     const cleanup = () => {
-      clearTimeout(startWatchdog);
+      if (startWatchdog) clearTimeout(startWatchdog);
+      if (finishDelay) clearTimeout(finishDelay);
+      if (cancelWatchdog) clearTimeout(cancelWatchdog);
       try {
         Tts.removeEventListener('tts-start', handleStart);
         Tts.removeEventListener('tts-finish', handleFinish);
-        Tts.removeEventListener('tts-cancel', handleFinish);
+        Tts.removeEventListener('tts-cancel', handleCancel);
       } catch {
         // Some native emitters throw during teardown after failed setup.
       }
@@ -343,9 +359,16 @@ class VoiceEngineService {
 
     const finish = () => {
       if (completed) return;
+      const elapsed = Date.now() - queuedAt;
+      if (started && elapsed < minimumPlaybackMs) {
+        if (finishDelay) clearTimeout(finishDelay);
+        finishDelay = setTimeout(finish, minimumPlaybackMs - elapsed);
+        return;
+      }
+
       completed = true;
       cleanup();
-      this.onSpeechDone().catch((error) => {
+      this.onSpeechDone(playbackGeneration, SYSTEM_TTS_COOLDOWN_MS).catch((error) => {
         console.warn('[VoiceEngine] Failed to finish native TTS:', error);
       });
     };
@@ -353,7 +376,7 @@ class VoiceEngineService {
     const handleStart = (event: TtsEvent) => {
       if (!matchesUtterance(event) || completed) return;
       started = true;
-      clearTimeout(startWatchdog);
+      if (startWatchdog) clearTimeout(startWatchdog);
       this.setState('speaking');
     };
 
@@ -362,7 +385,26 @@ class VoiceEngineService {
       finish();
     };
 
-    const startWatchdog = setTimeout(() => {
+    const handleCancel = (event: TtsEvent) => {
+      if (!matchesUtterance(event) || completed) return;
+      console.warn('[VoiceEngine] Native TTS reported cancel before finish; waiting for a finish event.');
+      if (startWatchdog) clearTimeout(startWatchdog);
+      if (cancelWatchdog) return;
+      cancelWatchdog = setTimeout(() => {
+        if (completed) return;
+        completed = true;
+        cleanup();
+        track('voice_audio_interrupted', {
+          provider: 'system',
+          error_category: 'tts_cancelled',
+        });
+        this.continuousMode = false;
+        this.usePlaybackAudioMode(false).catch(() => {});
+        this.setState('idle');
+      }, SYSTEM_TTS_CANCEL_GRACE_MS);
+    };
+
+    startWatchdog = setTimeout(() => {
       if (started || completed) return;
       console.warn('[VoiceEngine] Native TTS did not report playback start.');
       this.stopNativeTts();
@@ -372,7 +414,7 @@ class VoiceEngineService {
     try {
       Tts.addEventListener('tts-start', handleStart);
       Tts.addEventListener('tts-finish', handleFinish);
-      Tts.addEventListener('tts-cancel', handleFinish);
+      Tts.addEventListener('tts-cancel', handleCancel);
       this.ttsCleanup = cleanup;
     } catch (error) {
       console.warn('[VoiceEngine] Failed to subscribe to native TTS events:', error);
@@ -557,7 +599,10 @@ class VoiceEngineService {
     await this.onSpeechDone(generation);
   }
 
-  private async onSpeechDone(generation = this.playbackGeneration): Promise<void> {
+  private async onSpeechDone(
+    generation = this.playbackGeneration,
+    cooldownMs = POST_TTS_COOLDOWN_MS,
+  ): Promise<void> {
     if (generation !== this.playbackGeneration) return;
 
     const shouldResume = this.continuousMode;
@@ -572,7 +617,7 @@ class VoiceEngineService {
       this.startListening(true).catch((e) => {
         console.warn('[VoiceEngine] Failed to resume listening:', e);
       });
-    }, POST_TTS_COOLDOWN_MS);
+    }, cooldownMs);
   }
 
   async stopSpeaking(): Promise<void> {
