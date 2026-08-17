@@ -633,7 +633,7 @@ actor WatchGatewayClient {
       chatRequestId = id
       let params: [String: Any] = [
         "message": text,
-        "sessionKey": "main",
+        "sessionKey": "agent:main:main",
         "idempotencyKey": "clawvoice-watch-\\(UUID().uuidString)",
       ]
       try await send(["type": "req", "id": id, "method": "chat.send", "params": params])

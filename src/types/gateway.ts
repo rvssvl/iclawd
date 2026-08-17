@@ -1,4 +1,4 @@
-// OpenClaw Gateway Protocol v3 Types
+// OpenClaw Gateway Protocol v4-compatible types
 
 export type FrameType = 'req' | 'res' | 'event';
 

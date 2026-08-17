@@ -1,6 +1,6 @@
 import { NativeEventEmitter, NativeModules, Platform } from 'react-native';
 import * as SecureStore from '@/services/SafeSecureStore';
-import { ELEVENLABS_KEY, isElevenLabsSttEnabled } from '@/services/ElevenLabsConfig';
+import { ELEVENLABS_KEY, isElevenLabsSttEnabled, isValidElevenLabsApiKey } from '@/services/ElevenLabsConfig';
 import { getGatewayConfig } from '@/services/SecureStorage';
 import { getVoiceLanguage } from '@/services/VoiceLanguageConfig';
 
@@ -66,7 +66,7 @@ export async function syncWatchConfiguration(): Promise<boolean> {
   setWatchConfiguration({
     gatewayUrl: configuration.url,
     gatewayToken: configuration.token,
-    ...(sttEnabled && elevenLabsKey?.trim() ? { elevenLabsKey: elevenLabsKey.trim() } : {}),
+    ...(sttEnabled && isValidElevenLabsApiKey(elevenLabsKey) ? { elevenLabsKey: elevenLabsKey.trim() } : {}),
     languageCode: language.languageCode,
     locale: language.locale,
   });

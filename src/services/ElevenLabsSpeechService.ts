@@ -1,3 +1,5 @@
+import { isElevenLabsApiKeyRejection } from '@/services/ElevenLabsConfig';
+
 const ELEVENLABS_STT_URL = 'https://api.elevenlabs.io/v1/speech-to-text';
 const ELEVENLABS_STT_MODEL = 'scribe_v1';
 
@@ -9,7 +11,7 @@ export class ElevenLabsSpeechError extends Error {
     super(message);
     this.name = 'ElevenLabsSpeechError';
     this.status = status;
-    this.authFailure = status === 401 || status === 403;
+    this.authFailure = isElevenLabsApiKeyRejection(message, status);
   }
 }
 

@@ -5,14 +5,17 @@ import {
   gatewayProfileToConfig,
   getActiveGatewayProfile,
   saveGatewayProfile,
-  updateActiveGatewayDeviceToken,
 } from '@/services/GatewayProfiles';
 
 const GATEWAY_CONFIG_KEY = 'iclawd_gateway_config';
 
 export async function saveGatewayConfig(config: GatewayConfig): Promise<void> {
   await SecureStore.setItemAsync(GATEWAY_CONFIG_KEY, JSON.stringify(config));
-  await saveGatewayProfile({ ...config, backend: 'openclaw' });
+  const activeProfile = await getActiveGatewayProfile();
+  await saveGatewayProfile(
+    { ...config, backend: 'openclaw' },
+    activeProfile ? { id: activeProfile.id } : undefined,
+  );
 }
 
 export async function getGatewayConfig(): Promise<GatewayConfig | null> {
@@ -39,8 +42,6 @@ export async function deleteGatewayConfig(): Promise<void> {
 export async function updateDeviceToken(deviceToken: string): Promise<void> {
   const config = await getGatewayConfig();
   if (config) {
-    config.deviceToken = deviceToken;
-    await saveGatewayConfig(config);
-    await updateActiveGatewayDeviceToken(deviceToken);
+    await saveGatewayConfig({ ...config, deviceToken });
   }
 }

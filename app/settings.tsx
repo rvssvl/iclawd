@@ -30,6 +30,7 @@ import {
   ELEVENLABS_TTS_VOICE_ID,
   getElevenLabsTtsSettings,
   isElevenLabsSttEnabled,
+  isValidElevenLabsApiKey,
   setElevenLabsSttEnabled,
   saveElevenLabsTtsSetting,
 } from '@/services/ElevenLabsConfig';
@@ -188,12 +189,21 @@ export default function SettingsScreen() {
   }
 
   async function handleSaveKey() {
-    await saveElevenLabsKey(keyInput);
-    setElevenLabsKey(keyInput.trim());
-    if (keyInput.trim()) {
+    const nextKey = keyInput.trim();
+    if (nextKey && !isValidElevenLabsApiKey(nextKey)) {
+      Alert.alert(
+        'Invalid ElevenLabs API Key',
+        'Enter the API key value, not its ID. ElevenLabs API keys start with “sk_”.',
+      );
+      return;
+    }
+
+    await saveElevenLabsKey(nextKey);
+    setElevenLabsKey(nextKey);
+    if (nextKey) {
       track('elevenlabs_key_added', { screen: 'settings' });
     }
-    if (!keyInput.trim()) {
+    if (!nextKey) {
       await setElevenLabsSttEnabled(false);
       setElevenLabsStt(false);
     }
@@ -328,6 +338,7 @@ export default function SettingsScreen() {
     ? Updates.createdAt.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
     : null;
   const appVersion = Constants.expoConfig?.version || 'Unavailable';
+  const hasValidElevenLabsKey = isValidElevenLabsApiKey(elevenLabsKey);
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
@@ -381,12 +392,12 @@ export default function SettingsScreen() {
       <View style={styles.card}>
         <View style={styles.row}>
           <Text style={styles.rowLabel}>Text-to-Speech</Text>
-          <Text style={styles.rowValue}>{elevenLabsKey ? 'ElevenLabs' : 'System Voice'}</Text>
+          <Text style={styles.rowValue}>{hasValidElevenLabsKey ? 'ElevenLabs' : 'System Voice'}</Text>
         </View>
         <View style={styles.divider} />
         <View style={styles.row}>
           <Text style={styles.rowLabel}>Speech-to-Text</Text>
-          <Text style={styles.rowValue}>{elevenLabsKey && elevenLabsStt ? 'ElevenLabs' : 'System'}</Text>
+          <Text style={styles.rowValue}>{hasValidElevenLabsKey && elevenLabsStt ? 'ElevenLabs' : 'System'}</Text>
         </View>
         <View style={styles.divider} />
         <Pressable style={styles.row} onPress={handleSelectVoiceLanguage}>
@@ -420,9 +431,9 @@ export default function SettingsScreen() {
             </View>
           </View>
         ) : (
-          <Pressable style={styles.row} onPress={elevenLabsKey ? handleClearKey : handleEditKey}>
+          <Pressable style={styles.row} onPress={hasValidElevenLabsKey ? handleClearKey : handleEditKey}>
             <Text style={styles.rowLabel}>ElevenLabs API Key</Text>
-            {elevenLabsKey ? (
+            {hasValidElevenLabsKey ? (
               <View style={styles.keyConfigured}>
                 <Text style={styles.rowValue}>
                   {'•'.repeat(4)}{elevenLabsKey.slice(-4)}
@@ -436,7 +447,7 @@ export default function SettingsScreen() {
             )}
           </Pressable>
         )}
-        {elevenLabsKey ? (
+        {hasValidElevenLabsKey ? (
           <>
             <View style={styles.divider} />
             <View style={styles.row}>

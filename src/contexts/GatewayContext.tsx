@@ -22,6 +22,7 @@ import { prepareAssistantSpeechText, rememberAssistantSpeech } from '@/utils/ass
 
 const KEY_AUTO_PRONOUNCE = 'iclawd_auto_pronounce';
 const KEY_NOTIFICATIONS = 'iclawd_notifications';
+const RESPONSE_START_TIMEOUT_MS = 45000;
 
 // Suppress notification banners when app is in foreground — only show when backgrounded/closed
 function getNotifications(): typeof ExpoNotifications | null {
@@ -68,11 +69,42 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
   const [activeGatewayId, setActiveGatewayId] = useState<string | null>(null);
   const stoppedResponseRef = useRef(false);
   const activeGatewayIdRef = useRef<string | null>(null);
+  const responseStartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Settings refs (read from SecureStore, updated by settings screen)
   const autoPronounceRef = useRef(true);
   const notificationsRef = useRef(true);
   const lastSpokenMsgIdRef = useRef<string | null>(null);
+
+  function clearResponseStartTimer() {
+    if (responseStartTimerRef.current) {
+      clearTimeout(responseStartTimerRef.current);
+      responseStartTimerRef.current = null;
+    }
+  }
+
+  function beginResponseStartTimer() {
+    clearResponseStartTimer();
+    responseStartTimerRef.current = setTimeout(() => {
+      responseStartTimerRef.current = null;
+      setAwaitingResponse(false);
+      setStreamingText('');
+      setStreamingId(null);
+      const timeoutMessage: ChatMessage = {
+        id: createLocalMessageId('gateway-timeout'),
+        role: 'assistant',
+        content: 'Your gateway accepted the message but did not start a response within 45 seconds. It may still be working; check the gateway logs before sending another message.',
+        timestamp: Date.now(),
+      };
+      setMessages((previous) => {
+        const next = [...previous, timeoutMessage];
+        if (activeGatewayIdRef.current) {
+          appendConversationMessage(activeGatewayIdRef.current, timeoutMessage).catch(() => {});
+        }
+        return next;
+      });
+    }, RESPONSE_START_TIMEOUT_MS);
+  }
 
   // Load settings
   useEffect(() => {
@@ -109,6 +141,7 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
 
   function connectWithConfig(config: GatewayConfig, profileId?: string) {
     clientRef.current?.disconnect();
+    clearResponseStartTimer();
     setConnectionError(null);
 
     const client = new GatewayClient(config);
@@ -127,6 +160,7 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
     client.onError(setConnectionError);
 
     client.onMessage((msg) => {
+      clearResponseStartTimer();
       if (stoppedResponseRef.current) {
         setAwaitingResponse(false);
         setStreamingText('');
@@ -182,6 +216,7 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
     });
 
     client.onStream((text, msgId) => {
+      clearResponseStartTimer();
       if (stoppedResponseRef.current) return;
 
       setAwaitingResponse(false);
@@ -190,6 +225,7 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
     });
 
     client.onActivity((active) => {
+      clearResponseStartTimer();
       if (stoppedResponseRef.current) {
         if (!active) {
           stoppedResponseRef.current = false;
@@ -225,6 +261,7 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
 
     return () => {
       mounted = false;
+      clearResponseStartTimer();
       clientRef.current?.disconnect();
     };
   }, []);
@@ -244,13 +281,16 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
     }
     setStreamingText('');
     setAwaitingResponse(false);
+    clearResponseStartTimer();
     stoppedResponseRef.current = false;
 
     try {
       await clientRef.current.sendChat(text);
       trackOnce('first_chat_sent');
       setAwaitingResponse(true);
+      beginResponseStartTimer();
     } catch (error) {
+      clearResponseStartTimer();
       setAwaitingResponse(false);
       const errMsg = error instanceof Error ? error.message : 'Failed to send message';
       const systemMsg: ChatMessage = {
@@ -268,6 +308,7 @@ export function GatewayProvider({ children }: { children: React.ReactNode }) {
 
   const stopChat = useCallback(async () => {
     stoppedResponseRef.current = true;
+    clearResponseStartTimer();
     setAwaitingResponse(false);
     setStreamingText('');
     setStreamingId(null);

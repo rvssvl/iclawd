@@ -19,6 +19,22 @@ export interface ElevenLabsTtsSettings {
   similarityBoost: number;
 }
 
+/**
+ * ElevenLabs API key *IDs* look similar to usable keys in their dashboard.
+ * Only the secret value, which begins with `sk_`, can authenticate requests.
+ */
+export function isValidElevenLabsApiKey(value: string | null | undefined): value is string {
+  return typeof value === 'string' && /^sk_[A-Za-z0-9_-]+$/.test(value.trim());
+}
+
+export function isElevenLabsApiKeyRejection(message: string, status?: number): boolean {
+  const isBadRequest = status === 400 || /HTTP\s+400\b/i.test(message);
+  return status === 401
+    || status === 403
+    || /HTTP\s+(401|403)\b/i.test(message)
+    || (isBadRequest && /invalid_api_key|api key id used as api key|only valid api keys/i.test(message));
+}
+
 function clamp(value: number, min: number, max: number): number {
   if (Number.isNaN(value)) return min;
   return Math.min(max, Math.max(min, value));
@@ -51,7 +67,7 @@ export async function isElevenLabsSttEnabled(): Promise<boolean> {
     SecureStore.getItemAsync(ELEVENLABS_STT_ENABLED),
     SecureStore.getItemAsync(ELEVENLABS_KEY),
   ]);
-  return enabled === 'true' && Boolean(apiKey?.trim());
+  return enabled === 'true' && isValidElevenLabsApiKey(apiKey);
 }
 
 export async function setElevenLabsSttEnabled(enabled: boolean): Promise<void> {

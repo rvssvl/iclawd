@@ -11,7 +11,9 @@ import {
   ELEVENLABS_KEY,
   ELEVENLABS_STT_ENABLED,
   getElevenLabsTtsSettings,
+  isElevenLabsApiKeyRejection,
   isElevenLabsSttEnabled,
+  isValidElevenLabsApiKey,
 } from '@/services/ElevenLabsConfig';
 import { ElevenLabsSpeechError, transcribeWithElevenLabs } from '@/services/ElevenLabsSpeechService';
 import { getVoiceLanguage } from '@/services/VoiceLanguageConfig';
@@ -29,7 +31,6 @@ interface SuspendOptions {
 }
 
 const ELEVENLABS_MODEL = 'eleven_flash_v2_5';
-const ELEVENLABS_AUTH_FAILURE = /HTTP\s+(401|403)\b/i;
 const ELEVENLABS_TTS_TIMEOUT_MS = 30000;
 const QUICK_MANUAL_STOP_MS = 700;
 const NO_SPEECH_TIMEOUT_MS = 6000;
@@ -285,7 +286,7 @@ class VoiceEngineService {
 
     const elevenLabsKey = await SecureStore.getItemAsync(ELEVENLABS_KEY);
     console.log('[VoiceEngine] speak() — ElevenLabs:', elevenLabsKey ? 'configured' : 'not set');
-    if (elevenLabsKey) {
+    if (isValidElevenLabsApiKey(elevenLabsKey)) {
       await this.speakWithElevenLabs(text, elevenLabsKey);
     } else {
       await this.speakWithSystem(text);
@@ -507,7 +508,7 @@ class VoiceEngineService {
         arrayBuffer = await requestAudio();
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (ELEVENLABS_AUTH_FAILURE.test(message)) throw error;
+        if (isElevenLabsApiKeyRejection(message)) throw error;
         console.warn('[VoiceEngine] ElevenLabs TTS retrying after:', message);
         arrayBuffer = await requestAudio();
       }
@@ -556,7 +557,7 @@ class VoiceEngineService {
       const errMsg = e instanceof Error ? e.message : String(e);
       track('voice_tts_failed', { provider: 'elevenlabs', error_category: categorizeError(errMsg) });
       console.warn('[VoiceEngine] ElevenLabs TTS failed:', errMsg);
-      const authFailed = ELEVENLABS_AUTH_FAILURE.test(errMsg);
+      const authFailed = isElevenLabsApiKeyRejection(errMsg);
 
       if (authFailed) {
         await SecureStore.deleteItemAsync(ELEVENLABS_KEY);

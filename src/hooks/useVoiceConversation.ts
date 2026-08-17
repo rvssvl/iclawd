@@ -128,6 +128,16 @@ export function useVoiceConversation({
     }
   }, [awaitingResponse]);
 
+  // Gateways can finish a run without producing an assistant message (for
+  // example an empty final or a server-side error). Do not leave voice mode in
+  // its waiting state once the gateway has declared the request complete.
+  useEffect(() => {
+    if (!awaitingResponse && !streamingText && state.status === 'awaitingAgent') {
+      inFlightUtteranceRef.current = null;
+      dispatch({ type: 'AGENT_FINAL' });
+    }
+  }, [awaitingResponse, state.status, streamingText]);
+
   useEffect(() => {
     if (streamingText) {
       dispatch({ type: 'AGENT_STREAMING' });

@@ -19,10 +19,11 @@ import { getVoiceLanguage } from '@/services/VoiceLanguageConfig';
 
 const PROTOCOL_VERSION = 3;
 const PROTOCOL_MAX_VERSION = 4;
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '3.1.0';
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 const TICK_DEFAULT_MS = 15000;
+export const DEFAULT_MAIN_SESSION_KEY = 'agent:main:main';
 
 const KEY_DEVICE_ID = 'iclawd_device_id';
 const KEY_KEYPAIR_PUBLIC = 'iclawd_keypair_pub';
@@ -307,20 +308,26 @@ export class GatewayClient {
   async sendChat(message: string, sessionKey?: string): Promise<void> {
     await this.rpc('chat.send', {
       message,
-      sessionKey: sessionKey || 'main',
+      sessionKey: sessionKey || DEFAULT_MAIN_SESSION_KEY,
       idempotencyKey: `iclawd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     });
   }
 
-  async stopChat(): Promise<void> {
-    if (!this.canStopChat()) {
+  async stopChat(sessionKey = DEFAULT_MAIN_SESSION_KEY): Promise<void> {
+    const method = this.supportedMethods.has('chat.abort')
+      ? 'chat.abort'
+      : this.supportedMethods.has('chat.stop')
+        ? 'chat.stop'
+        : null;
+    if (!method || !this.canStopChat()) {
       return;
     }
-    await this.rpc('chat.stop', {});
+    await this.rpc(method, method === 'chat.abort' ? { sessionKey } : {});
   }
 
   canStopChat(): boolean {
-    return this.supportedMethods.has('chat.stop') && this.authScopes.has('operator.admin');
+    return (this.supportedMethods.has('chat.abort') || this.supportedMethods.has('chat.stop'))
+      && (this.authScopes.has('operator.write') || this.authScopes.has('operator.admin'));
   }
 
   async getStatus(): Promise<Record<string, unknown>> {

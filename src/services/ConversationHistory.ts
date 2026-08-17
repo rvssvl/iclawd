@@ -33,6 +33,38 @@ export async function appendConversationMessage(gatewayId: string, message: Chat
   await saveConversationHistory(gatewayId, [...existing, message], sessionKey);
 }
 
+/**
+ * Keeps locally stored conversations reachable when duplicate gateway profiles
+ * are consolidated. Source files are deliberately left in place: the profile
+ * migration should never turn a storage cleanup into an irreversible delete.
+ */
+export async function mergeConversationHistories(targetGatewayId: string, sourceGatewayIds: string[]): Promise<void> {
+  if (!targetGatewayId || sourceGatewayIds.length === 0) return;
+
+  const histories = await Promise.all([
+    loadConversationHistory(targetGatewayId),
+    ...sourceGatewayIds
+      .filter((gatewayId) => gatewayId && gatewayId !== targetGatewayId)
+      .map((gatewayId) => loadConversationHistory(gatewayId)),
+  ]);
+
+  const seen = new Set<string>();
+  const merged = histories
+    .flat()
+    .filter((message) => {
+      const identity = message.id || `${message.role}\u0000${message.timestamp}\u0000${message.content}`;
+      if (seen.has(identity)) return false;
+      seen.add(identity);
+      return true;
+    })
+    .sort((left, right) => left.timestamp - right.timestamp)
+    .slice(-MAX_MESSAGES_PER_SESSION);
+
+  if (merged.length > 0) {
+    await saveConversationHistory(targetGatewayId, merged);
+  }
+}
+
 export async function clearConversationHistory(gatewayId?: string, sessionKey = DEFAULT_SESSION_KEY): Promise<void> {
   if (!gatewayId) {
     await FileSystem.deleteAsync(HISTORY_DIR, { idempotent: true });
